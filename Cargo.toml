@@ -1,0 +1,32 @@
+[package]
+name = "flip-companion"
+version = "0.1.0"
+edition = "2021"
+description = "Bottom-screen companion app for AYANEO Flip DS on Bazzite"
+license = "MIT"
+rust-version = "1.75"
+
+[dependencies]
+# UI framework — compiled from .slint files via build.rs
+slint = "1"
+
+# Async D-Bus client — talks to KScreen + KWin Script (Plasma 6)
+zbus = { version = "4", default-features = false, features = ["tokio"] }
+
+# System stats — CPU, GPU, RAM, battery, thermals
+sysinfo = "0.32"
+
+# Async runtime — bridges to Slint UI via mpsc channels
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process"] }
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+[build-dependencies]
+slint-build = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1
