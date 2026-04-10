@@ -1,0 +1,82 @@
+// Stats panel — system stats dashboard.
+
+component StatRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <float> percent;
+
+    height: 44px;
+    background: #16213e;
+    border-radius: 6px;
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        alignment: space-between;
+
+        Text {
+            text: label;
+            font-size: 14px;
+            color: #a0a0b8;
+            vertical-alignment: center;
+        }
+        Text {
+            text: value;
+            font-size: 14px;
+            color: #e0e0f0;
+            vertical-alignment: center;
+        }
+    }
+
+    // Progress bar overlay
+    Rectangle {
+        x: 0;
+        y: parent.height - 3px;
+        height: 3px;
+        width: parent.width * clamp(percent, 0, 1);
+        background: percent > 0.85 ? #e94560 : percent > 0.6 ? #f0a500 : #0f3460;
+        border-radius: 1.5px;
+    }
+}
+
+export component Stats inherits Rectangle {
+    // These properties will be set from Rust via invoke_from_event_loop.
+    in property <float> cpu-usage: 0;
+    in property <float> cpu-temp: 0;
+    in property <float> gpu-usage: 0;
+    in property <float> gpu-temp: 0;
+    in property <float> mem-used-gb: 0;
+    in property <float> mem-total-gb: 0;
+    in property <float> battery-percent: 0;
+    in property <bool> battery-charging: false;
+
+    background: #1a1a2e;
+
+    VerticalLayout {
+        alignment: start;
+        padding: 16px;
+        spacing: 12px;
+
+        Text {
+            text: "System Stats";
+            font-size: 20px;
+            color: #e0e0f0;
+            horizontal-alignment: center;
+        }
+
+        StatRow { label: "CPU"; value: Math.round(cpu-usage) + "%"; percent: cpu-usage / 100; }
+        StatRow { label: "CPU Temp"; value: Math.round(cpu-temp) + "°C"; percent: cpu-temp / 100; }
+        StatRow { label: "GPU"; value: Math.round(gpu-usage) + "%"; percent: gpu-usage / 100; }
+        StatRow { label: "GPU Temp"; value: Math.round(gpu-temp) + "°C"; percent: gpu-temp / 100; }
+        StatRow {
+            label: "RAM";
+            value: Math.round(mem-used-gb * 10) / 10 + " / " + Math.round(mem-total-gb * 10) / 10 + " GB";
+            percent: mem-total-gb > 0 ? mem-used-gb / mem-total-gb : 0;
+        }
+        StatRow {
+            label: battery-charging ? "Battery ⚡" : "Battery";
+            value: Math.round(battery-percent) + "%";
+            percent: battery-percent / 100;
+        }
+    }
+}

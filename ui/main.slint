@@ -1,14 +1,91 @@
-// Placeholder — will hold the root Slint component once UI work begins.
+// Flip Companion — root UI layout for the bottom screen.
+// Three tabs: Keyboard, Stats, Shuttle.
+// All touch targets are ≥48px for finger-friendly operation.
+
+import { Keyboard } from "keyboard.slint";
+import { Stats } from "stats.slint";
+import { Shuttle } from "shuttle.slint";
+
+component TabButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked();
+
+    horizontal-stretch: 1;
+    border-radius: 8px;
+    background: active ? #0f3460 : transparent;
+
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    Text {
+        text: label;
+        font-size: 22px;
+        color: active ? #e94560 : #a0a0b8;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
 
 export component App inherits Window {
     title: "Flip Companion";
     preferred-width: 480px;
     preferred-height: 800px;
+    background: #1a1a2e;
 
-    Text {
-        text: "Flip Companion";
-        font-size: 28px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+    // Track which tab is active: 0=Keyboard, 1=Stats, 2=Shuttle
+    in-out property <int> active-tab: 0;
+
+    // --- Callbacks for backend communication (wired in Rust via mpsc) ---
+    callback key-pressed(string);
+    callback shuttle-window(string, string); // window_id, direction ("up"/"down")
+    callback request-refresh();
+
+    VerticalLayout {
+        // Content area — fills available space
+        Rectangle {
+            vertical-stretch: 1;
+
+            Keyboard {
+                visible: active-tab == 0;
+                key-pressed(key) => { root.key-pressed(key); }
+            }
+            Stats {
+                visible: active-tab == 1;
+            }
+            Shuttle {
+                visible: active-tab == 2;
+                shuttle-window(id, dir) => { root.shuttle-window(id, dir); }
+                request-refresh() => { root.request-refresh(); }
+            }
+        }
+
+        // Tab bar at the bottom — always visible
+        Rectangle {
+            height: 56px;
+            background: #16213e;
+
+            HorizontalLayout {
+                padding: 4px;
+                spacing: 4px;
+
+                TabButton {
+                    label: "⌨️";
+                    active: active-tab == 0;
+                    clicked => { active-tab = 0; }
+                }
+                TabButton {
+                    label: "📊";
+                    active: active-tab == 1;
+                    clicked => { active-tab = 1; }
+                }
+                TabButton {
+                    label: "🔀";
+                    active: active-tab == 2;
+                    clicked => { active-tab = 2; }
+                }
+            }
+        }
     }
 }
