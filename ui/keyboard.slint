@@ -1,0 +1,25 @@
+// Keyboard panel — placeholder for the virtual on-screen keyboard.
+
+export component Keyboard inherits Rectangle {
+    callback key-pressed(string);
+
+    background: #1a1a2e;
+
+    VerticalLayout {
+        alignment: center;
+        padding: 20px;
+
+        Text {
+            text: "Keyboard";
+            font-size: 24px;
+            color: #e0e0f0;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: "Touch keyboard coming soon";
+            font-size: 14px;
+            color: #808098;
+            horizontal-alignment: center;
+        }
+    }
+}

@@ -1,0 +1,46 @@
+// Shuttle panel — placeholder for window shuttle (send up / send down).
+
+export component Shuttle inherits Rectangle {
+    callback shuttle-window(string, string); // window_id, direction
+    callback request-refresh();
+
+    background: #1a1a2e;
+
+    VerticalLayout {
+        alignment: center;
+        padding: 20px;
+        spacing: 12px;
+
+        Text {
+            text: "Window Shuttle";
+            font-size: 24px;
+            color: #e0e0f0;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: "Window list coming soon";
+            font-size: 14px;
+            color: #808098;
+            horizontal-alignment: center;
+        }
+
+        // Refresh button
+        Rectangle {
+            height: 48px;
+            background: #0f3460;
+            border-radius: 8px;
+
+            TouchArea {
+                clicked => { root.request-refresh(); }
+            }
+
+            Text {
+                text: "Refresh";
+                font-size: 16px;
+                color: #e0e0f0;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
