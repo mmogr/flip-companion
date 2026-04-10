@@ -34,6 +34,10 @@ glob = "0.3"
 # Linux evdev uinput — virtual keyboard injection
 evdev = "0.13"
 
+# JSON parsing for KWin script D-Bus responses
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
 [build-dependencies]
 slint-build = "1"
 
