@@ -1513,6 +1513,7 @@ dependencies = [
 name = "flip-companion"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "clap",
  "slint",
  "slint-build",

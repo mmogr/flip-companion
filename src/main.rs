@@ -6,6 +6,10 @@
 //   UI sends commands to backend via mpsc::Sender
 //   Never block the Slint event loop with async calls.
 
+pub mod backend;
+pub mod platform;
+pub mod types;
+
 fn main() {
     println!("flip-companion — not yet implemented");
 }
