@@ -1,5 +1,5 @@
 // Global state singletons — Rust backend writes to these via
-// app.global::<StatsStore>().set_*() through upgrade_in_event_loop().
+// app.global::<Store>().set_*() through upgrade_in_event_loop().
 // UI components read from these directly.
 
 export global StatsStore {
@@ -11,4 +11,15 @@ export global StatsStore {
     in-out property <float> mem-total-gb: 16;
     in-out property <float> battery-percent: 0;
     in-out property <bool> battery-charging: false;
+}
+
+// A single entry in the window list shown by the shuttle panel.
+export struct WindowEntry {
+    id: string,
+    caption: string,
+    output: string,
+}
+
+export global ShuttleStore {
+    in-out property <[WindowEntry]> windows;
 }
