@@ -77,3 +77,33 @@ install-kwin-script:
 # Remove build artifacts
 clean:
     cargo clean
+
+# ── Install / Uninstall ────────────────────────────────────────
+
+# Install everything locally (binary, KWin script, systemd, udev, desktop)
+install: build-release
+    mkdir -p ~/.local/bin
+    cp target/release/flip-companion ~/.local/bin/
+    kpackagetool6 --type KWin/Script -u kwin-script 2>/dev/null || true
+    kpackagetool6 --type KWin/Script -i kwin-script
+    mkdir -p ~/.config/systemd/user
+    cp deploy/systemd/flip-companion.service ~/.config/systemd/user/
+    systemctl --user daemon-reload
+    systemctl --user enable flip-companion.service
+    mkdir -p ~/.local/share/applications
+    cp deploy/desktop/flip-companion.desktop ~/.local/share/applications/
+    sudo cp deploy/udev/99-uinput.rules /etc/udev/rules.d/
+    sudo udevadm control --reload
+    @echo "✓ Installed. Log out/in or run: systemctl --user start flip-companion"
+
+# Remove everything installed by 'just install'
+uninstall:
+    systemctl --user disable --now flip-companion.service 2>/dev/null || true
+    rm -f ~/.local/bin/flip-companion
+    rm -f ~/.config/systemd/user/flip-companion.service
+    systemctl --user daemon-reload
+    rm -f ~/.local/share/applications/flip-companion.desktop
+    kpackagetool6 --type KWin/Script -r flip-companion-shuttle 2>/dev/null || true
+    sudo rm -f /etc/udev/rules.d/99-uinput.rules
+    sudo udevadm control --reload
+    @echo "✓ Uninstalled."
