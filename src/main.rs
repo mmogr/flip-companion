@@ -35,7 +35,7 @@ fn main() {
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
         rt.block_on(async {
-            let (stats, input, windows) = create_backends(&config);
+            let (stats, input, windows) = create_backends(&config).await;
             app::backend_loop(rx, app_weak, stats, input, windows).await;
         });
     });
@@ -63,7 +63,7 @@ fn wire_callbacks(app: &App, tx: mpsc::Sender<UICommand>) {
     });
 }
 
-fn create_backends(
+async fn create_backends(
     config: &Config,
 ) -> (
     Box<dyn platform::stats::StatsProvider>,
@@ -77,7 +77,6 @@ fn create_backends(
             Box::new(backend::mock::window::MockWindowManager::new()),
         )
     } else {
-        // Real stats backend; window still mock until Issue #13.
         let input: Box<dyn platform::input::InputInjector> =
             match backend::evdev_input::EvdevInputInjector::try_new() {
                 Ok(injector) => Box::new(injector),
@@ -86,10 +85,25 @@ fn create_backends(
                     Box::new(backend::mock::input::MockInputInjector)
                 }
             };
+
+        let windows: Box<dyn platform::window::WindowManager> =
+            match backend::kwin_window::KWinWindowManager::try_new().await {
+                Ok(wm) => Box::new(wm),
+                Err(e) => {
+                    eprintln!(
+                        "[warn] KWin D-Bus init failed: {e}. \
+                         Ensure the flip-companion KWin script is installed via \
+                         kpackagetool6 and enabled in KWin. \
+                         Falling back to mock windows."
+                    );
+                    Box::new(backend::mock::window::MockWindowManager::new())
+                }
+            };
+
         (
             Box::new(backend::sysinfo_stats::SysinfoStatsProvider::new()),
             input,
-            Box::new(backend::mock::window::MockWindowManager::new()),
+            windows,
         )
     }
 }
