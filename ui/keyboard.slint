@@ -1,25 +1,115 @@
-// Keyboard panel — placeholder for the virtual on-screen keyboard.
+// Keyboard panel — full QWERTY virtual on-screen keyboard.
+
+component KeyCap inherits Rectangle {
+    in property <string> label;
+    in property <float> stretch: 1;
+    callback tapped();
+
+    horizontal-stretch: stretch;
+    min-height: 48px;
+    border-radius: 6px;
+    background: ta.pressed ? #0f3460 : #16213e;
+    border-width: 1px;
+    border-color: #2a2a4a;
+
+    ta := TouchArea {
+        clicked => { root.tapped(); }
+    }
+
+    Text {
+        text: root.label;
+        font-size: 18px;
+        color: #e0e0f0;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
 
 export component Keyboard inherits Rectangle {
     callback key-pressed(string);
 
+    in-out property <bool> shift-active: false;
+
     background: #1a1a2e;
 
     VerticalLayout {
-        alignment: center;
-        padding: 20px;
+        padding: 6px;
+        spacing: 6px;
 
-        Text {
-            text: "Keyboard";
-            font-size: 24px;
-            color: #e0e0f0;
-            horizontal-alignment: center;
+        // Row 1: Numbers
+        HorizontalLayout {
+            spacing: 4px;
+            KeyCap { label: "1"; tapped => { root.key-pressed("1"); root.shift-active = false; } }
+            KeyCap { label: "2"; tapped => { root.key-pressed("2"); root.shift-active = false; } }
+            KeyCap { label: "3"; tapped => { root.key-pressed("3"); root.shift-active = false; } }
+            KeyCap { label: "4"; tapped => { root.key-pressed("4"); root.shift-active = false; } }
+            KeyCap { label: "5"; tapped => { root.key-pressed("5"); root.shift-active = false; } }
+            KeyCap { label: "6"; tapped => { root.key-pressed("6"); root.shift-active = false; } }
+            KeyCap { label: "7"; tapped => { root.key-pressed("7"); root.shift-active = false; } }
+            KeyCap { label: "8"; tapped => { root.key-pressed("8"); root.shift-active = false; } }
+            KeyCap { label: "9"; tapped => { root.key-pressed("9"); root.shift-active = false; } }
+            KeyCap { label: "0"; tapped => { root.key-pressed("0"); root.shift-active = false; } }
         }
-        Text {
-            text: "Touch keyboard coming soon";
-            font-size: 14px;
-            color: #808098;
-            horizontal-alignment: center;
+
+        // Row 2: QWERTY top row
+        HorizontalLayout {
+            spacing: 4px;
+            KeyCap { label: root.shift-active ? "Q" : "q"; tapped => { root.key-pressed(root.shift-active ? "Q" : "q"); root.shift-active = false; } }
+            KeyCap { label: root.shift-active ? "W" : "w"; tapped => { root.key-pressed(root.shift-active ? "W" : "w"); root.shift-active = false; } }
+            KeyCap { label: root.shift-active ? "E" : "e"; tapped => { root.key-pressed(root.shift-active ? "E" : "e"); root.shift-active = false; } }
+            KeyCap { label: root.shift-active ? "R" : "r"; tapped => { root.key-pressed(root.shift-active ? "R" : "r"); root.shift-active = false; } }
+            KeyCap { label: root.shift-active ? "T" : "t"; tapped => { root.key-pressed(root.shift-active ? "T" : "t"); root.shift-active = false; } }
+            KeyCap { label: root.shift-active ? "Y" : "y"; tapped => { root.key-pressed(root.shift-active ? "Y" : "y"); root.shift-active = false; } }
+            KeyCap { label: root.shift-active ? "U" : "u"; tapped => { root.key-pressed(root.shift-active ? "U" : "u"); root.shift-active = false; } }
+            KeyCap { label: root.shift-active ? "I" : "i"; tapped => { root.key-pressed(root.shift-active ? "I" : "i"); root.shift-active = false; } }
+            KeyCap { label: root.shift-active ? "O" : "o"; tapped => { root.key-pressed(root.shift-active ? "O" : "o"); root.shift-active = false; } }
+            KeyCap { label: root.shift-active ? "P" : "p"; tapped => { root.key-pressed(root.shift-active ? "P" : "p"); root.shift-active = false; } }
+        }
+
+        // Row 3: Home row
+        HorizontalLayout {
+            spacing: 4px;
+            KeyCap { label: root.shift-active ? "A" : "a"; tapped => { root.key-pressed(root.shift-active ? "A" : "a"); root.shift-active = false; } }
+            KeyCap { label: root.shift-active ? "S" : "s"; tapped => { root.key-pressed(root.shift-active ? "S" : "s"); root.shift-active = false; } }
+            KeyCap { label: root.shift-active ? "D" : "d"; tapped => { root.key-pressed(root.shift-active ? "D" : "d"); root.shift-active = false; } }
+            KeyCap { label: root.shift-active ? "F" : "f"; tapped => { root.key-pressed(root.shift-active ? "F" : "f"); root.shift-active = false; } }
+            KeyCap { label: root.shift-active ? "G" : "g"; tapped => { root.key-pressed(root.shift-active ? "G" : "g"); root.shift-active = false; } }
+            KeyCap { label: root.shift-active ? "H" : "h"; tapped => { root.key-pressed(root.shift-active ? "H" : "h"); root.shift-active = false; } }
+            KeyCap { label: root.shift-active ? "J" : "j"; tapped => { root.key-pressed(root.shift-active ? "J" : "j"); root.shift-active = false; } }
+            KeyCap { label: root.shift-active ? "K" : "k"; tapped => { root.key-pressed(root.shift-active ? "K" : "k"); root.shift-active = false; } }
+            KeyCap { label: root.shift-active ? "L" : "l"; tapped => { root.key-pressed(root.shift-active ? "L" : "l"); root.shift-active = false; } }
+        }
+
+        // Row 4: Shift + bottom row + Backspace
+        HorizontalLayout {
+            spacing: 4px;
+            KeyCap {
+                label: root.shift-active ? "⇧ ON" : "⇧";
+                stretch: 1.5;
+                tapped => { root.shift-active = !root.shift-active; }
+            }
+            KeyCap { label: root.shift-active ? "Z" : "z"; tapped => { root.key-pressed(root.shift-active ? "Z" : "z"); root.shift-active = false; } }
+            KeyCap { label: root.shift-active ? "X" : "x"; tapped => { root.key-pressed(root.shift-active ? "X" : "x"); root.shift-active = false; } }
+            KeyCap { label: root.shift-active ? "C" : "c"; tapped => { root.key-pressed(root.shift-active ? "C" : "c"); root.shift-active = false; } }
+            KeyCap { label: root.shift-active ? "V" : "v"; tapped => { root.key-pressed(root.shift-active ? "V" : "v"); root.shift-active = false; } }
+            KeyCap { label: root.shift-active ? "B" : "b"; tapped => { root.key-pressed(root.shift-active ? "B" : "b"); root.shift-active = false; } }
+            KeyCap { label: root.shift-active ? "N" : "n"; tapped => { root.key-pressed(root.shift-active ? "N" : "n"); root.shift-active = false; } }
+            KeyCap { label: root.shift-active ? "M" : "m"; tapped => { root.key-pressed(root.shift-active ? "M" : "m"); root.shift-active = false; } }
+            KeyCap {
+                label: "⌫";
+                stretch: 1.5;
+                tapped => { root.key-pressed("BackSpace"); root.shift-active = false; }
+            }
+        }
+
+        // Row 5: Modifiers + Space + Enter
+        HorizontalLayout {
+            spacing: 4px;
+            KeyCap { label: "Tab"; stretch: 1.2; tapped => { root.key-pressed("Tab"); root.shift-active = false; } }
+            KeyCap { label: "Ctrl"; stretch: 1.2; tapped => { root.key-pressed("Ctrl"); root.shift-active = false; } }
+            KeyCap { label: "Alt"; stretch: 1.2; tapped => { root.key-pressed("Alt"); root.shift-active = false; } }
+            KeyCap { label: " "; stretch: 4; tapped => { root.key-pressed("space"); root.shift-active = false; } }
+            KeyCap { label: "Enter"; stretch: 1.5; tapped => { root.key-pressed("Return"); root.shift-active = false; } }
         }
     }
 }
