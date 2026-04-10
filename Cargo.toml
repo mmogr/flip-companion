@@ -17,7 +17,7 @@ zbus = { version = "4", default-features = false, features = ["tokio"] }
 sysinfo = "0.32"
 
 # Async runtime — bridges to Slint UI via mpsc channels
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "fs"] }
 
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }
@@ -27,6 +27,9 @@ anyhow = "1"
 
 # Async trait support for dyn-compatible platform traits
 async-trait = "0.1"
+
+# Glob pattern matching for sysfs path discovery
+glob = "0.3"
 
 [build-dependencies]
 slint-build = "1"

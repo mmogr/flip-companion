@@ -1516,6 +1516,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "clap",
+ "glob",
  "slint",
  "slint-build",
  "sysinfo",
