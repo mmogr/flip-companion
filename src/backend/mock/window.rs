@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+
 use crate::platform::window::WindowManager;
 use crate::types::display::OutputId;
 use crate::types::window::{ShuttleDirection, WindowId, WindowInfo};
@@ -5,6 +7,12 @@ use crate::types::window::{ShuttleDirection, WindowId, WindowInfo};
 /// Mock window manager with a fixed set of fake windows.
 pub struct MockWindowManager {
     windows: Vec<WindowInfo>,
+}
+
+impl Default for MockWindowManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MockWindowManager {
@@ -31,6 +39,7 @@ impl MockWindowManager {
     }
 }
 
+#[async_trait]
 impl WindowManager for MockWindowManager {
     async fn list_windows(&self) -> anyhow::Result<Vec<WindowInfo>> {
         Ok(self.windows.clone())
@@ -45,10 +54,7 @@ impl WindowManager for MockWindowManager {
             ShuttleDirection::Up => "MOCK-TOP",
             ShuttleDirection::Down => "MOCK-BOTTOM",
         };
-        println!(
-            "[mock-window] shuttle {:?} → {target}",
-            window_id.0
-        );
+        println!("[mock-window] shuttle {:?} → {target}", window_id.0);
         Ok(())
     }
 }

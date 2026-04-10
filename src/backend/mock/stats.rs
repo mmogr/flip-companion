@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+
 use crate::platform::stats::StatsProvider;
 use crate::types::stats::{BatteryInfo, CpuInfo, GpuInfo, MemoryInfo, SystemSnapshot};
 
@@ -12,6 +14,13 @@ impl MockStatsProvider {
     }
 }
 
+impl Default for MockStatsProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
 impl StatsProvider for MockStatsProvider {
     async fn snapshot(&mut self) -> anyhow::Result<SystemSnapshot> {
         self.tick = self.tick.wrapping_add(1);

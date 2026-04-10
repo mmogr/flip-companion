@@ -1,5 +1,7 @@
 // Stats panel — system stats dashboard.
 
+import { StatsStore } from "globals.slint";
+
 component StatRow inherits Rectangle {
     in property <string> label;
     in property <string> value;
@@ -40,16 +42,6 @@ component StatRow inherits Rectangle {
 }
 
 export component Stats inherits Rectangle {
-    // These properties will be set from Rust via invoke_from_event_loop.
-    in property <float> cpu-usage: 0;
-    in property <float> cpu-temp: 0;
-    in property <float> gpu-usage: 0;
-    in property <float> gpu-temp: 0;
-    in property <float> mem-used-gb: 0;
-    in property <float> mem-total-gb: 0;
-    in property <float> battery-percent: 0;
-    in property <bool> battery-charging: false;
-
     background: #1a1a2e;
 
     VerticalLayout {
@@ -64,19 +56,19 @@ export component Stats inherits Rectangle {
             horizontal-alignment: center;
         }
 
-        StatRow { label: "CPU"; value: Math.round(cpu-usage) + "%"; percent: cpu-usage / 100; }
-        StatRow { label: "CPU Temp"; value: Math.round(cpu-temp) + "°C"; percent: cpu-temp / 100; }
-        StatRow { label: "GPU"; value: Math.round(gpu-usage) + "%"; percent: gpu-usage / 100; }
-        StatRow { label: "GPU Temp"; value: Math.round(gpu-temp) + "°C"; percent: gpu-temp / 100; }
+        StatRow { label: "CPU"; value: Math.round(StatsStore.cpu-usage) + "%"; percent: StatsStore.cpu-usage / 100; }
+        StatRow { label: "CPU Temp"; value: Math.round(StatsStore.cpu-temp) + "°C"; percent: StatsStore.cpu-temp / 100; }
+        StatRow { label: "GPU"; value: Math.round(StatsStore.gpu-usage) + "%"; percent: StatsStore.gpu-usage / 100; }
+        StatRow { label: "GPU Temp"; value: Math.round(StatsStore.gpu-temp) + "°C"; percent: StatsStore.gpu-temp / 100; }
         StatRow {
             label: "RAM";
-            value: Math.round(mem-used-gb * 10) / 10 + " / " + Math.round(mem-total-gb * 10) / 10 + " GB";
-            percent: mem-total-gb > 0 ? mem-used-gb / mem-total-gb : 0;
+            value: Math.round(StatsStore.mem-used-gb * 10) / 10 + " / " + Math.round(StatsStore.mem-total-gb * 10) / 10 + " GB";
+            percent: StatsStore.mem-total-gb > 0 ? StatsStore.mem-used-gb / StatsStore.mem-total-gb : 0;
         }
         StatRow {
-            label: battery-charging ? "Battery ⚡" : "Battery";
-            value: Math.round(battery-percent) + "%";
-            percent: battery-percent / 100;
+            label: StatsStore.battery-charging ? "Battery ⚡" : "Battery";
+            value: Math.round(StatsStore.battery-percent) + "%";
+            percent: StatsStore.battery-percent / 100;
         }
     }
 }

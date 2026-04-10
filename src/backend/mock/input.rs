@@ -1,8 +1,11 @@
+use async_trait::async_trait;
+
 use crate::platform::input::InputInjector;
 
 /// Mock input injector that logs keystrokes to stdout.
 pub struct MockInputInjector;
 
+#[async_trait]
 impl InputInjector for MockInputInjector {
     async fn type_text(&self, text: &str) -> anyhow::Result<()> {
         println!("[mock-input] type_text: {text:?}");
