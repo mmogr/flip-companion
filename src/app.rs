@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use slint::ComponentHandle;
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use tokio::sync::mpsc;
 
 use crate::platform::input::InputInjector;
@@ -94,11 +94,22 @@ async fn handle_shuttle(windows: &dyn WindowManager, id: &str, direction: &str) 
     }
 }
 
-async fn handle_refresh_windows(windows: &dyn WindowManager, _app_weak: &slint::Weak<App>) {
+async fn handle_refresh_windows(windows: &dyn WindowManager, app_weak: &slint::Weak<App>) {
     match windows.list_windows().await {
         Ok(window_list) => {
-            // TODO: Push window list to ShuttleStore global once it exists (Issue #14)
-            println!("[shuttle] refreshed: {} windows", window_list.len());
+            let entries: Vec<WindowEntry> = window_list
+                .into_iter()
+                .map(|w| WindowEntry {
+                    id: SharedString::from(&w.id.0),
+                    caption: SharedString::from(&w.caption),
+                    output: SharedString::from(w.output.as_ref().map_or("", |o| o.0.as_str())),
+                })
+                .collect();
+
+            let _ = app_weak.upgrade_in_event_loop(move |app| {
+                let store = app.global::<ShuttleStore>();
+                store.set_windows(ModelRc::new(VecModel::from(entries)));
+            });
         }
         Err(e) => eprintln!("[shuttle] refresh error: {e}"),
     }

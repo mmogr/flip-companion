@@ -6,7 +6,9 @@ import { Keyboard } from "keyboard.slint";
 import { Stats } from "stats.slint";
 import { Shuttle } from "shuttle.slint";
 import { StatsStore } from "globals.slint";
+import { ShuttleStore } from "globals.slint";
 export { StatsStore }
+export { ShuttleStore }
 
 component TabButton inherits Rectangle {
     in property <string> label;
@@ -85,7 +87,10 @@ export component App inherits Window {
                 TabButton {
                     label: "🔀";
                     active: active-tab == 2;
-                    clicked => { active-tab = 2; }
+                    clicked => {
+                        active-tab = 2;
+                        root.request-refresh();
+                    }
                 }
             }
         }

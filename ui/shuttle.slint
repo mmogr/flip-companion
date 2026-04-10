@@ -1,4 +1,76 @@
-// Shuttle panel — placeholder for window shuttle (send up / send down).
+// Shuttle panel — shows live window list with controls to move windows
+// between the top (primary) and bottom (companion) screens.
+
+import { ShuttleStore } from "globals.slint";
+import { ListView } from "std-widgets.slint";
+
+component ShuttleButton inherits Rectangle {
+    in property <string> label;
+    callback clicked();
+
+    width: 48px;
+    height: 48px;
+    border-radius: 8px;
+    background: ta.pressed ? #1a5276 : #0f3460;
+
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    Text {
+        text: label;
+        font-size: 20px;
+        color: #e0e0f0;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component WindowRow inherits Rectangle {
+    in property <string> window-id;
+    in property <string> caption;
+    in property <string> output;
+    callback shuttle(string, string); // window_id, direction
+
+    height: 64px;
+    background: #16213e;
+    border-radius: 8px;
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 8px;
+        spacing: 8px;
+        alignment: center;
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 2px;
+
+            Text {
+                text: caption;
+                font-size: 16px;
+                color: #e0e0f0;
+                overflow: elide;
+            }
+            Text {
+                text: output == "" ? "unknown" : output;
+                font-size: 12px;
+                color: #808098;
+                overflow: elide;
+            }
+        }
+
+        ShuttleButton {
+            label: "⬆";
+            clicked => { root.shuttle(root.window-id, "up"); }
+        }
+        ShuttleButton {
+            label: "⬇";
+            clicked => { root.shuttle(root.window-id, "down"); }
+        }
+    }
+}
 
 export component Shuttle inherits Rectangle {
     callback shuttle-window(string, string); // window_id, direction
@@ -7,39 +79,58 @@ export component Shuttle inherits Rectangle {
     background: #1a1a2e;
 
     VerticalLayout {
-        alignment: center;
-        padding: 20px;
-        spacing: 12px;
+        padding: 12px;
+        spacing: 10px;
 
-        Text {
-            text: "Window Shuttle";
-            font-size: 24px;
-            color: #e0e0f0;
-            horizontal-alignment: center;
+        // Header row with title + refresh button
+        HorizontalLayout {
+            alignment: stretch;
+            spacing: 8px;
+
+            Text {
+                text: "Window Shuttle";
+                font-size: 22px;
+                color: #e0e0f0;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+
+            Rectangle {
+                width: 96px;
+                height: 48px;
+                border-radius: 8px;
+                background: refresh-ta.pressed ? #1a5276 : #0f3460;
+
+                refresh-ta := TouchArea {
+                    clicked => { root.request-refresh(); }
+                }
+
+                Text {
+                    text: "Refresh";
+                    font-size: 16px;
+                    color: #e0e0f0;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
         }
-        Text {
-            text: "Window list coming soon";
+
+        // Window list
+        if ShuttleStore.windows.length == 0 : Text {
+            text: "No windows. Tap Refresh.";
             font-size: 14px;
             color: #808098;
             horizontal-alignment: center;
         }
 
-        // Refresh button
-        Rectangle {
-            height: 48px;
-            background: #0f3460;
-            border-radius: 8px;
+        ListView {
+            vertical-stretch: 1;
 
-            TouchArea {
-                clicked => { root.request-refresh(); }
-            }
-
-            Text {
-                text: "Refresh";
-                font-size: 16px;
-                color: #e0e0f0;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            for win in ShuttleStore.windows : WindowRow {
+                window-id: win.id;
+                caption: win.caption;
+                output: win.output;
+                shuttle(id, dir) => { root.shuttle-window(id, dir); }
             }
         }
     }
