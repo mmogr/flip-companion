@@ -6,6 +6,7 @@
 //   UI sends commands to backend via mpsc::Sender
 //   Never block the Slint event loop with async calls.
 
+pub mod backend;
 pub mod platform;
 pub mod types;
 
