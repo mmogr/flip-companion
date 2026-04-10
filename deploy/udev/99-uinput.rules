@@ -1,3 +1,3 @@
 # Allow members of the "input" group to write to /dev/uinput.
-# Required for ydotool input injection (virtual keyboard feature).
+# Required for evdev uinput input injection (virtual keyboard feature).
 KERNEL=="uinput", GROUP="input", MODE="0660"
