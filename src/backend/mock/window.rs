@@ -54,10 +54,7 @@ impl WindowManager for MockWindowManager {
             ShuttleDirection::Up => "MOCK-TOP",
             ShuttleDirection::Down => "MOCK-BOTTOM",
         };
-        println!(
-            "[mock-window] shuttle {:?} → {target}",
-            window_id.0
-        );
+        println!("[mock-window] shuttle {:?} → {target}", window_id.0);
         Ok(())
     }
 }
