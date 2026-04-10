@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Flip Companion
+Comment=Bottom-screen companion panel for AYANEO Flip DS
+Exec=flip-companion
+Icon=utilities-terminal
+Terminal=false
+Categories=Utility;System;
+X-GNOME-Autostart-enabled=true
