@@ -87,7 +87,7 @@ async fn create_backends(
             };
 
         let windows: Box<dyn platform::window::WindowManager> =
-            match backend::kwin_window::KWinWindowManager::try_new().await {
+            match backend::kwin_window::KWinWindowManager::try_new(config.output.clone()).await {
                 Ok(wm) => Box::new(wm),
                 Err(e) => {
                     eprintln!(

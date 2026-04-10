@@ -54,10 +54,12 @@ struct KWinOutput {
 
 pub struct KWinWindowManager {
     proxy: FlipCompanionShuttleProxy<'static>,
+    /// If set via `--output`, always use this as the "down" screen.
+    output_override: Option<String>,
 }
 
 impl KWinWindowManager {
-    pub async fn try_new() -> anyhow::Result<Self> {
+    pub async fn try_new(output_override: Option<String>) -> anyhow::Result<Self> {
         let conn = zbus::Connection::session().await?;
         let proxy = FlipCompanionShuttleProxy::new(&conn).await?;
 
@@ -70,7 +72,10 @@ impl KWinWindowManager {
             )
         })?;
 
-        Ok(Self { proxy })
+        Ok(Self {
+            proxy,
+            output_override,
+        })
     }
 }
 
@@ -87,7 +92,8 @@ impl WindowManager for KWinWindowManager {
         direction: ShuttleDirection,
     ) -> anyhow::Result<()> {
         let outputs_json = self.proxy.list_outputs().await?;
-        let target_name = pick_target_output(&outputs_json, direction)?;
+        let target_name =
+            pick_target_output(&outputs_json, direction, self.output_override.as_deref())?;
 
         let result = self
             .proxy
@@ -122,7 +128,11 @@ fn parse_windows_json(json: &str) -> anyhow::Result<Vec<WindowInfo>> {
         .collect())
 }
 
-fn pick_target_output(outputs_json: &str, direction: ShuttleDirection) -> anyhow::Result<String> {
+fn pick_target_output(
+    outputs_json: &str,
+    direction: ShuttleDirection,
+    output_override: Option<&str>,
+) -> anyhow::Result<String> {
     let mut outputs: Vec<KWinOutput> = serde_json::from_str(outputs_json)?;
 
     if outputs.len() < 2 {
@@ -135,9 +145,20 @@ fn pick_target_output(outputs_json: &str, direction: ShuttleDirection) -> anyhow
     // Sort by Y: lowest Y = top screen (Up), highest Y = bottom screen (Down).
     outputs.sort_by_key(|o| o.y);
 
-    let target = match direction {
-        ShuttleDirection::Up => &outputs[0],
-        ShuttleDirection::Down => outputs.last().unwrap(),
+    let target = match (direction, output_override) {
+        // --output pin: "down" always goes to the named output,
+        // "up" goes to whichever output is NOT the override.
+        (ShuttleDirection::Down, Some(name)) => outputs
+            .iter()
+            .find(|o| o.name == name)
+            .ok_or_else(|| anyhow::anyhow!("--output {name} not found among outputs"))?,
+        (ShuttleDirection::Up, Some(name)) => outputs
+            .iter()
+            .find(|o| o.name != name)
+            .ok_or_else(|| anyhow::anyhow!("no output other than --output {name}"))?,
+        // Auto-detect: lowest Y = Up, highest Y = Down.
+        (ShuttleDirection::Up, None) => &outputs[0],
+        (ShuttleDirection::Down, None) => outputs.last().unwrap(),
     };
 
     Ok(target.name.clone())
@@ -188,7 +209,7 @@ mod tests {
             {"name": "eDP-2", "x": 0, "y": 1080, "width": 1920, "height": 1080}
         ]"#;
 
-        let name = pick_target_output(json, ShuttleDirection::Up).unwrap();
+        let name = pick_target_output(json, ShuttleDirection::Up, None).unwrap();
         assert_eq!(name, "eDP-1");
     }
 
@@ -199,8 +220,41 @@ mod tests {
             {"name": "eDP-2", "x": 0, "y": 1080, "width": 1920, "height": 1080}
         ]"#;
 
-        let name = pick_target_output(json, ShuttleDirection::Down).unwrap();
+        let name = pick_target_output(json, ShuttleDirection::Down, None).unwrap();
         assert_eq!(name, "eDP-2");
+    }
+
+    #[test]
+    fn pick_target_output_with_override_down() {
+        let json = r#"[
+            {"name": "eDP-1", "x": 0, "y": 0, "width": 1920, "height": 1080},
+            {"name": "eDP-2", "x": 0, "y": 1080, "width": 1920, "height": 1080}
+        ]"#;
+
+        let name = pick_target_output(json, ShuttleDirection::Down, Some("eDP-2")).unwrap();
+        assert_eq!(name, "eDP-2");
+    }
+
+    #[test]
+    fn pick_target_output_with_override_up() {
+        let json = r#"[
+            {"name": "eDP-1", "x": 0, "y": 0, "width": 1920, "height": 1080},
+            {"name": "eDP-2", "x": 0, "y": 1080, "width": 1920, "height": 1080}
+        ]"#;
+
+        // "up" with --output eDP-2 should pick the OTHER output.
+        let name = pick_target_output(json, ShuttleDirection::Up, Some("eDP-2")).unwrap();
+        assert_eq!(name, "eDP-1");
+    }
+
+    #[test]
+    fn pick_target_output_override_not_found() {
+        let json = r#"[
+            {"name": "eDP-1", "x": 0, "y": 0, "width": 1920, "height": 1080},
+            {"name": "eDP-2", "x": 0, "y": 1080, "width": 1920, "height": 1080}
+        ]"#;
+
+        assert!(pick_target_output(json, ShuttleDirection::Down, Some("HDMI-1")).is_err());
     }
 
     #[test]
@@ -212,11 +266,11 @@ mod tests {
         ]"#;
 
         assert_eq!(
-            pick_target_output(json, ShuttleDirection::Up).unwrap(),
+            pick_target_output(json, ShuttleDirection::Up, None).unwrap(),
             "Top"
         );
         assert_eq!(
-            pick_target_output(json, ShuttleDirection::Down).unwrap(),
+            pick_target_output(json, ShuttleDirection::Down, None).unwrap(),
             "Bottom"
         );
     }
@@ -224,6 +278,6 @@ mod tests {
     #[test]
     fn pick_target_output_single_display_fails() {
         let json = r#"[{"name": "eDP-1", "x": 0, "y": 0, "width": 1920, "height": 1080}]"#;
-        assert!(pick_target_output(json, ShuttleDirection::Up).is_err());
+        assert!(pick_target_output(json, ShuttleDirection::Up, None).is_err());
     }
 }
