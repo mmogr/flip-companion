@@ -1,0 +1,13 @@
+[Unit]
+Description=Flip Companion — bottom-screen panel for AYANEO Flip DS
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/flip-companion
+Restart=on-failure
+RestartSec=3
+Environment=DISPLAY=:0
+
+[Install]
+WantedBy=graphical-session.target
