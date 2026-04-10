@@ -1,5 +1,7 @@
-/// Injects keyboard input into the focused window (via ydotool/uinput).
-#[allow(async_fn_in_trait)]
+use async_trait::async_trait;
+
+/// Injects keyboard input into the focused window (via uinput/evdev).
+#[async_trait]
 pub trait InputInjector: Send + Sync {
     /// Type a string into the currently focused window.
     async fn type_text(&self, text: &str) -> anyhow::Result<()>;

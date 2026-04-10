@@ -1,9 +1,12 @@
+use async_trait::async_trait;
+
 use crate::platform::display::DisplayDetector;
 use crate::types::display::{Geometry, OutputId, OutputInfo};
 
 /// Mock display detector returning a fake dual-screen setup.
 pub struct MockDisplayDetector;
 
+#[async_trait]
 impl DisplayDetector for MockDisplayDetector {
     async fn list_outputs(&self) -> anyhow::Result<Vec<OutputInfo>> {
         Ok(vec![
