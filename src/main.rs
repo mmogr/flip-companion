@@ -77,10 +77,18 @@ fn create_backends(
             Box::new(backend::mock::window::MockWindowManager::new()),
         )
     } else {
-        // Real stats backend; input/window still mock until Issues #12, #13.
+        // Real stats backend; window still mock until Issue #13.
+        let input: Box<dyn platform::input::InputInjector> =
+            match backend::evdev_input::EvdevInputInjector::try_new() {
+                Ok(injector) => Box::new(injector),
+                Err(e) => {
+                    eprintln!("[warn] evdev init failed: {e}, falling back to mock input");
+                    Box::new(backend::mock::input::MockInputInjector)
+                }
+            };
         (
             Box::new(backend::sysinfo_stats::SysinfoStatsProvider::new()),
-            Box::new(backend::mock::input::MockInputInjector),
+            input,
             Box::new(backend::mock::window::MockWindowManager::new()),
         )
     }
