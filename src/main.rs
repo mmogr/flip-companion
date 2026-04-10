@@ -77,11 +77,9 @@ fn create_backends(
             Box::new(backend::mock::window::MockWindowManager::new()),
         )
     } else {
-        // TODO: Wire real backends (Issues #10, #12, #13)
-        // For now, fall back to mock with a warning.
-        eprintln!("[warn] Real backends not yet implemented, falling back to mock");
+        // Real stats backend; input/window still mock until Issues #12, #13.
         (
-            Box::new(backend::mock::stats::MockStatsProvider::new()),
+            Box::new(backend::sysinfo_stats::SysinfoStatsProvider::new()),
             Box::new(backend::mock::input::MockInputInjector),
             Box::new(backend::mock::window::MockWindowManager::new()),
         )
