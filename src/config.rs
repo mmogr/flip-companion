@@ -12,4 +12,10 @@ pub struct Config {
     /// If not set, auto-detection is used.
     #[arg(long)]
     pub output: Option<String>,
+
+    /// Path to Gamescope's DRM lease socket (enables Game Mode).
+    /// Connects and receives a DRM lease fd via SCM_RIGHTS.
+    /// Default: /tmp/gamescope-lease.sock
+    #[arg(long)]
+    pub lease_socket: Option<String>,
 }

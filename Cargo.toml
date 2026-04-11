@@ -25,6 +25,13 @@ clap = { version = "4", features = ["derive"] }
 # Error handling
 anyhow = "1"
 
+# Low-level libc bindings — used for SCM_RIGHTS fd-passing
+libc = "0.2"
+
+# DRM/KMS bindings — used for mode-setting on the leased display
+drm = "0.12"
+drm-fourcc = "2"
+
 # Async trait support for dyn-compatible platform traits
 async-trait = "0.1"
 

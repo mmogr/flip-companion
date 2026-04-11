@@ -1,0 +1,9 @@
+# Prevent Gamescope/libinput from grabbing the bottom touchscreen
+# (Goodix GDIX1003) on the AYANEO Flip 1S DS so that flip-companion
+# can use it via evdev directly.
+#
+# Install: sudo cp 99-flip-companion-touch.rules /etc/udev/rules.d/
+# Reload: sudo udevadm control --reload-rules && sudo udevadm trigger
+
+# Match the Goodix I2C touch controller (bottom IPS panel, DP-1)
+SUBSYSTEM=="input", ATTRS{name}=="Goodix Capacitive TouchScreen", ENV{LIBINPUT_IGNORE_DEVICE}="1"
