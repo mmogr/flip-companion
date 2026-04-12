@@ -9,6 +9,42 @@ use crate::platform::input::InputInjector;
 
 const KEY_DELAY: Duration = Duration::from_millis(20);
 
+/// Build the shared key set used by both async and sync injectors.
+fn all_key_codes() -> AttributeSet<KeyCode> {
+    let mut keys = AttributeSet::<KeyCode>::new();
+    let codes = [
+        // Letters
+        KeyCode::KEY_A, KeyCode::KEY_B, KeyCode::KEY_C, KeyCode::KEY_D,
+        KeyCode::KEY_E, KeyCode::KEY_F, KeyCode::KEY_G, KeyCode::KEY_H,
+        KeyCode::KEY_I, KeyCode::KEY_J, KeyCode::KEY_K, KeyCode::KEY_L,
+        KeyCode::KEY_M, KeyCode::KEY_N, KeyCode::KEY_O, KeyCode::KEY_P,
+        KeyCode::KEY_Q, KeyCode::KEY_R, KeyCode::KEY_S, KeyCode::KEY_T,
+        KeyCode::KEY_U, KeyCode::KEY_V, KeyCode::KEY_W, KeyCode::KEY_X,
+        KeyCode::KEY_Y, KeyCode::KEY_Z,
+        // Digits
+        KeyCode::KEY_0, KeyCode::KEY_1, KeyCode::KEY_2, KeyCode::KEY_3,
+        KeyCode::KEY_4, KeyCode::KEY_5, KeyCode::KEY_6, KeyCode::KEY_7,
+        KeyCode::KEY_8, KeyCode::KEY_9,
+        // Special keys
+        KeyCode::KEY_ENTER, KeyCode::KEY_BACKSPACE, KeyCode::KEY_SPACE,
+        KeyCode::KEY_TAB, KeyCode::KEY_ESC, KeyCode::KEY_CAPSLOCK,
+        // Modifiers
+        KeyCode::KEY_LEFTSHIFT, KeyCode::KEY_RIGHTSHIFT,
+        KeyCode::KEY_LEFTCTRL, KeyCode::KEY_RIGHTCTRL,
+        KeyCode::KEY_LEFTALT, KeyCode::KEY_RIGHTALT,
+        // Punctuation / symbols
+        KeyCode::KEY_MINUS, KeyCode::KEY_EQUAL,
+        KeyCode::KEY_LEFTBRACE, KeyCode::KEY_RIGHTBRACE,
+        KeyCode::KEY_SEMICOLON, KeyCode::KEY_APOSTROPHE,
+        KeyCode::KEY_GRAVE, KeyCode::KEY_BACKSLASH,
+        KeyCode::KEY_COMMA, KeyCode::KEY_DOT, KeyCode::KEY_SLASH,
+    ];
+    for key in codes {
+        keys.insert(key);
+    }
+    keys
+}
+
 /// Real input injector using Linux evdev uinput.
 pub struct EvdevInputInjector {
     device: Mutex<VirtualDevice>,
@@ -16,76 +52,7 @@ pub struct EvdevInputInjector {
 
 impl EvdevInputInjector {
     pub fn try_new() -> anyhow::Result<Self> {
-        let mut keys = AttributeSet::<KeyCode>::new();
-        let all_keys = [
-            // Letters
-            KeyCode::KEY_A,
-            KeyCode::KEY_B,
-            KeyCode::KEY_C,
-            KeyCode::KEY_D,
-            KeyCode::KEY_E,
-            KeyCode::KEY_F,
-            KeyCode::KEY_G,
-            KeyCode::KEY_H,
-            KeyCode::KEY_I,
-            KeyCode::KEY_J,
-            KeyCode::KEY_K,
-            KeyCode::KEY_L,
-            KeyCode::KEY_M,
-            KeyCode::KEY_N,
-            KeyCode::KEY_O,
-            KeyCode::KEY_P,
-            KeyCode::KEY_Q,
-            KeyCode::KEY_R,
-            KeyCode::KEY_S,
-            KeyCode::KEY_T,
-            KeyCode::KEY_U,
-            KeyCode::KEY_V,
-            KeyCode::KEY_W,
-            KeyCode::KEY_X,
-            KeyCode::KEY_Y,
-            KeyCode::KEY_Z,
-            // Digits
-            KeyCode::KEY_0,
-            KeyCode::KEY_1,
-            KeyCode::KEY_2,
-            KeyCode::KEY_3,
-            KeyCode::KEY_4,
-            KeyCode::KEY_5,
-            KeyCode::KEY_6,
-            KeyCode::KEY_7,
-            KeyCode::KEY_8,
-            KeyCode::KEY_9,
-            // Special keys
-            KeyCode::KEY_ENTER,
-            KeyCode::KEY_BACKSPACE,
-            KeyCode::KEY_SPACE,
-            KeyCode::KEY_TAB,
-            KeyCode::KEY_ESC,
-            KeyCode::KEY_CAPSLOCK,
-            // Modifiers
-            KeyCode::KEY_LEFTSHIFT,
-            KeyCode::KEY_RIGHTSHIFT,
-            KeyCode::KEY_LEFTCTRL,
-            KeyCode::KEY_RIGHTCTRL,
-            KeyCode::KEY_LEFTALT,
-            KeyCode::KEY_RIGHTALT,
-            // Punctuation / symbols
-            KeyCode::KEY_MINUS,
-            KeyCode::KEY_EQUAL,
-            KeyCode::KEY_LEFTBRACE,
-            KeyCode::KEY_RIGHTBRACE,
-            KeyCode::KEY_SEMICOLON,
-            KeyCode::KEY_APOSTROPHE,
-            KeyCode::KEY_GRAVE,
-            KeyCode::KEY_BACKSLASH,
-            KeyCode::KEY_COMMA,
-            KeyCode::KEY_DOT,
-            KeyCode::KEY_SLASH,
-        ];
-        for key in all_keys {
-            keys.insert(key);
-        }
+        let keys = all_key_codes();
 
         let device = VirtualDevice::builder()?
             .name("flip-companion-kb")
@@ -120,6 +87,74 @@ async fn emit_keystroke(dev: &mut VirtualDevice, code: KeyCode, shift: bool) -> 
 
     if shift {
         tokio::time::sleep(KEY_DELAY).await;
+        dev.emit(&[
+            InputEvent::new(EventType::KEY.0, KeyCode::KEY_LEFTSHIFT.0, 0),
+            syn_report(),
+        ])?;
+    }
+
+    Ok(())
+}
+
+// ── Synchronous input injector for DRM (Game Mode) ──────────────────────
+
+/// Synchronous input injector for the DRM render loop (no tokio runtime).
+pub struct SyncEvdevInputInjector {
+    device: std::sync::Mutex<VirtualDevice>,
+}
+
+impl SyncEvdevInputInjector {
+    pub fn try_new() -> anyhow::Result<Self> {
+        let keys = all_key_codes();
+
+        let device = VirtualDevice::builder()?
+            .name("flip-companion-kb")
+            .with_keys(&keys)?
+            .build()?;
+
+        eprintln!("[input] created uinput virtual keyboard (sync)");
+        Ok(Self {
+            device: std::sync::Mutex::new(device),
+        })
+    }
+
+    /// Press and release a key by name (called from the DRM render loop).
+    pub fn press_key_sync(&self, key: &str) {
+        let (code, shift) = match map_key_name(key) {
+            Some(v) => v,
+            None => {
+                eprintln!("[input] unknown key: {key:?}");
+                return;
+            }
+        };
+
+        let mut dev = self.device.lock().unwrap();
+        if let Err(e) = emit_keystroke_sync(&mut dev, code, shift) {
+            eprintln!("[input] error pressing {key:?}: {e}");
+        }
+    }
+}
+
+fn emit_keystroke_sync(
+    dev: &mut VirtualDevice,
+    code: KeyCode,
+    shift: bool,
+) -> anyhow::Result<()> {
+    if shift {
+        dev.emit(&[
+            InputEvent::new(EventType::KEY.0, KeyCode::KEY_LEFTSHIFT.0, 1),
+            syn_report(),
+        ])?;
+        std::thread::sleep(KEY_DELAY);
+    }
+
+    dev.emit(&[InputEvent::new(EventType::KEY.0, code.0, 1), syn_report()])?;
+    std::thread::sleep(KEY_DELAY);
+
+    dev.emit(&[InputEvent::new(EventType::KEY.0, code.0, 0), syn_report()])?;
+
+    if shift {
+        std::thread::sleep(KEY_DELAY);
         dev.emit(&[
             InputEvent::new(EventType::KEY.0, KeyCode::KEY_LEFTSHIFT.0, 0),
             syn_report(),

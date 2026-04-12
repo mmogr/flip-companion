@@ -155,11 +155,19 @@ fn run_game_mode(socket_path: &str) {
     slint::platform::set_platform(Box::new(platform))
         .expect("failed to set Slint platform");
 
+    // Create key-press channel (must happen on this thread before run_event_loop).
+    let key_tx = backend::drm_platform::create_key_channel();
+
     // Create the same App UI as desktop mode — Slint renders it into DRM buffers.
     let app = App::new().expect("failed to create Slint app (game mode)");
 
-    // Default to the Stats tab (index 1) since touch isn't working yet.
-    app.set_active_tab(1);
+    // Default to the Keyboard tab (index 0) — touch is working now.
+    app.set_active_tab(0);
+
+    // Wire the keyboard callback to send key names through the channel.
+    app.on_key_pressed(move |key| {
+        let _ = key_tx.send(key.to_string());
+    });
 
     // Shared state for stats: the background thread writes, the render loop reads.
     // We can't use upgrade_in_event_loop because our custom Platform doesn't

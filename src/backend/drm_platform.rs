@@ -35,6 +35,20 @@ pub fn set_stats_callback(cb: Box<dyn Fn(SystemSnapshot)>) {
     STATS_APPLY.with(|slot| *slot.borrow_mut() = Some(cb));
 }
 
+/// Key-press channel: UI callback sends key names, render loop receives.
+thread_local! {
+    static KEY_RX: std::cell::RefCell<Option<mpsc::Receiver<String>>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Register the key-press receiver. Returns the sender for the UI callback.
+/// Must be called from the thread that will run the event loop.
+pub fn create_key_channel() -> mpsc::Sender<String> {
+    let (tx, rx) = mpsc::channel();
+    KEY_RX.with(|slot| *slot.borrow_mut() = Some(rx));
+    tx
+}
+
 use drm::buffer::Buffer;
 use drm::control::Device as ControlDevice;
 
@@ -388,6 +402,15 @@ impl Platform for DrmPlatform {
         let mut is_pressed = false;
         let mut last_touch_pos = slint::LogicalPosition::new(0.0, 0.0);
 
+        // Create uinput virtual keyboard for key injection
+        let key_injector = match super::evdev_input::SyncEvdevInputInjector::try_new() {
+            Ok(inj) => Some(inj),
+            Err(e) => {
+                eprintln!("[drm-platform] warning: no uinput keyboard: {e}");
+                None
+            }
+        };
+
         eprintln!(
             "[drm-platform] entering render loop \
              (logical {}x{}, drm stride={})",
@@ -432,6 +455,16 @@ impl Platform for DrmPlatform {
                         }
                     }
                 }
+            }
+            // ── Process keyboard events ─────────────────────────────
+            if let Some(ref injector) = key_injector {
+                KEY_RX.with(|slot| {
+                    if let Some(ref rx) = *slot.borrow() {
+                        while let Ok(key) = rx.try_recv() {
+                            injector.press_key_sync(&key);
+                        }
+                    }
+                });
             }
             // ── Poll shared stats and push to Slint via callback ────
             if let Some(shared) = STATS_SNAPSHOT.get() {
