@@ -1,0 +1,47 @@
+#!/bin/bash
+# flip-companion-touch-toggle — Enable/disable Goodix touchscreen isolation
+#
+# Dynamically installs or removes a udev rule that sets LIBINPUT_IGNORE_DEVICE=1
+# on the Goodix touchscreen, preventing libinput (and therefore Gamescope) from
+# grabbing it. This frees the device for flip-companion to read via evdev.
+#
+# The rule is placed in /run/udev/rules.d/ (tmpfs) so it is automatically
+# cleared on reboot — Desktop Mode touch always works by default.
+#
+# This script must be owned by root:root and is invoked via a narrowly-scoped
+# sudoers rule that allows members of the 'input' group to run it without a
+# password prompt.
+#
+# Usage:
+#   sudo /etc/flip-companion/touch-toggle enable
+#   sudo /etc/flip-companion/touch-toggle disable
+#
+# Installed by: install.sh → /etc/flip-companion/touch-toggle
+
+set -euo pipefail
+
+readonly RULE_SRC="/etc/flip-companion/99-flip-companion-touch.rules"
+readonly RULE_DST="/run/udev/rules.d/99-flip-companion-touch.rules"
+
+case "${1:-}" in
+    enable)
+        if [[ ! -f "$RULE_SRC" ]]; then
+            echo "flip-companion-touch-toggle: source rule not found: $RULE_SRC" >&2
+            exit 1
+        fi
+        cp "$RULE_SRC" "$RULE_DST"
+        udevadm control --reload-rules
+        udevadm trigger --subsystem-match=input
+        echo "flip-companion-touch-toggle: enabled (Goodix hidden from libinput)"
+        ;;
+    disable)
+        rm -f "$RULE_DST"
+        udevadm control --reload-rules
+        udevadm trigger --subsystem-match=input
+        echo "flip-companion-touch-toggle: disabled (Goodix returned to libinput)"
+        ;;
+    *)
+        echo "Usage: $0 {enable|disable}" >&2
+        exit 1
+        ;;
+esac

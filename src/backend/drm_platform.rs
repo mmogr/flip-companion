@@ -166,6 +166,8 @@ fn spawn_touch_thread(
         let mut cur_x: f32 = 0.0;
         let mut cur_y: f32 = 0.0;
         let mut is_down = false;
+        let mut pending_down = false;
+        let mut pending_up = false;
 
         // We need a mutable ref for fetch_events
         let mut dev = dev;
@@ -185,35 +187,38 @@ fn spawn_touch_thread(
                             }
                             evdev::EventType::KEY => {
                                 // BTN_TOUCH = 0x14a
+                                // Defer to SYN_REPORT so ABS_X/Y are up to date
                                 if ev.code() == 0x14a {
-                                    // Rotate panel portrait → landscape 90° CW:
-                                    //   lx = panel_y / y_max * landscape_w
-                                    //   ly = (1 - panel_x / x_max) * landscape_h
-                                    let lx =
-                                        (cur_y / y_max) * landscape_w as f32;
-                                    let ly = (1.0 - cur_x / x_max)
-                                        * landscape_h as f32;
-
                                     if ev.value() == 1 {
-                                        is_down = true;
-                                        eprintln!("[touch] DOWN raw=({},{}) logical=({:.0},{:.0})", cur_x, cur_y, lx, ly);
-                                        let _ = tx.send(TouchEvent::Down {
-                                            x: lx,
-                                            y: ly,
-                                        });
+                                        pending_down = true;
                                     } else {
-                                        is_down = false;
-                                        eprintln!("[touch] UP");
-                                        let _ = tx.send(TouchEvent::Up);
+                                        pending_up = true;
                                     }
                                 }
                             }
                             evdev::EventType::SYNCHRONIZATION => {
-                                if is_down {
-                                    let lx = (cur_y / y_max)
-                                        * landscape_w as f32;
-                                    let ly = (1.0 - cur_x / x_max)
-                                        * landscape_h as f32;
+                                // Rotate panel portrait → landscape 90° CCW:
+                                //   lx = (1 - panel_y / y_max) * landscape_w
+                                //   ly = panel_x / x_max * landscape_h
+                                let lx = (1.0 - cur_y / y_max)
+                                    * landscape_w as f32;
+                                let ly = (cur_x / x_max)
+                                    * landscape_h as f32;
+
+                                if pending_down {
+                                    is_down = true;
+                                    pending_down = false;
+                                    eprintln!("[touch] DOWN raw=({},{}) logical=({:.0},{:.0})", cur_x, cur_y, lx, ly);
+                                    let _ = tx.send(TouchEvent::Down {
+                                        x: lx,
+                                        y: ly,
+                                    });
+                                } else if pending_up {
+                                    is_down = false;
+                                    pending_up = false;
+                                    eprintln!("[touch] UP");
+                                    let _ = tx.send(TouchEvent::Up);
+                                } else if is_down {
                                     let _ = tx.send(TouchEvent::Move {
                                         x: lx,
                                         y: ly,
@@ -381,6 +386,7 @@ impl Platform for DrmPlatform {
         let lh = self.logical_height as usize; // 1080
 
         let mut is_pressed = false;
+        let mut last_touch_pos = slint::LogicalPosition::new(0.0, 0.0);
 
         eprintln!(
             "[drm-platform] entering render loop \
@@ -395,11 +401,10 @@ impl Platform for DrmPlatform {
                     match ev {
                         TouchEvent::Down { x, y } => {
                             is_pressed = true;
+                            last_touch_pos = slint::LogicalPosition::new(x, y);
                             self.window.dispatch_event(
                                 slint::platform::WindowEvent::PointerPressed {
-                                    position: slint::LogicalPosition::new(
-                                        x, y,
-                                    ),
+                                    position: last_touch_pos,
                                     button:
                                         slint::platform::PointerEventButton::Left,
                                 },
@@ -407,10 +412,10 @@ impl Platform for DrmPlatform {
                         }
                         TouchEvent::Move { x, y } => {
                             if is_pressed {
+                                last_touch_pos = slint::LogicalPosition::new(x, y);
                                 self.window.dispatch_event(
                                     slint::platform::WindowEvent::PointerMoved {
-                                        position:
-                                            slint::LogicalPosition::new(x, y),
+                                        position: last_touch_pos,
                                     },
                                 );
                             }
@@ -419,9 +424,7 @@ impl Platform for DrmPlatform {
                             is_pressed = false;
                             self.window.dispatch_event(
                                 slint::platform::WindowEvent::PointerReleased {
-                                    position: slint::LogicalPosition::new(
-                                        0.0, 0.0,
-                                    ),
+                                    position: last_touch_pos,
                                     button:
                                         slint::platform::PointerEventButton::Left,
                                 },

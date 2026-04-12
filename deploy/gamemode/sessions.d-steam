@@ -1,10 +1,11 @@
 #!/usr/bin/bash
 # User override for gamescope-session-plus steam session.
-# Launches flip-companion on the bottom screen after gamescope starts.
+# Launches flip-companion on the bottom screen after gamescope starts,
+# and manages the Goodix touchscreen libinput isolation rule.
 #
 # Installed to: ~/.config/gamescope-session-plus/sessions.d/steam
 # The upstream file at /usr/share/gamescope-session-plus/sessions.d/steam
-# is sourced first; this file is sourced after and redefines the function.
+# is sourced first; this file is sourced after and redefines the functions.
 
 function post_gamescope_start {
     # Preserve upstream behavior: run steam-tweaks
@@ -12,8 +13,22 @@ function post_gamescope_start {
         steam-tweaks
     fi
 
+    # Hide the Goodix touchscreen from libinput so flip-companion can
+    # read it directly via evdev (placed in /run/udev/rules.d/ tmpfs —
+    # automatically cleared on reboot for Desktop Mode safety).
+    if [ -x /etc/flip-companion/touch-toggle ]; then
+        sudo /etc/flip-companion/touch-toggle enable
+    fi
+
     # Launch flip-companion on the bottom screen via DRM lease
     if [ -x "$HOME/.local/bin/flip-companion" ]; then
         "$HOME/.local/bin/flip-companion" --lease-socket /tmp/gamescope-lease.sock &
+    fi
+}
+
+function post_client_shutdown {
+    # Return the Goodix touchscreen to libinput for Desktop Mode / KDE.
+    if [ -x /etc/flip-companion/touch-toggle ]; then
+        sudo /etc/flip-companion/touch-toggle disable
     fi
 }

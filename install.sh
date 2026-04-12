@@ -77,7 +77,7 @@ do_install() {
     echo ""
 
     # Resolve versions
-    step "1/5  Resolving release versions..."
+    step "1/6  Resolving release versions..."
     local comp_tag game_tag
     comp_tag="$(resolve_version "$COMPANION_REPO" "$COMPANION_VERSION")"
     game_tag="$(resolve_version "$GAMESCOPE_REPO" "$GAMESCOPE_VERSION")"
@@ -91,13 +91,13 @@ do_install() {
     info "gamescope:      ${game_tag}"
 
     # Download binaries
-    step "2/5  Downloading binaries..."
+    step "2/6  Downloading binaries..."
     mkdir -p "$INSTALL_DIR"
     download_binary "$COMPANION_REPO" "$comp_tag" "flip-companion" "$INSTALL_DIR/flip-companion"
     download_binary "$GAMESCOPE_REPO" "$game_tag"  "gamescope"      "$INSTALL_DIR/gamescope"
 
     # Install wrapper script
-    step "3/5  Installing gamescope wrapper..."
+    step "3/6  Installing gamescope wrapper..."
     local deploy_dir="$SCRIPT_DIR/deploy/gamemode"
     if [[ -f "$deploy_dir/gamescope-lease-wrapper" ]]; then
         cp "$deploy_dir/gamescope-lease-wrapper" "$INSTALL_DIR/gamescope-lease-wrapper"
@@ -112,7 +112,7 @@ WRAPPER
     info "Installed gamescope-lease-wrapper"
 
     # Install session configs
-    step "4/5  Configuring Bazzite Game Mode..."
+    step "4/6  Configuring Bazzite Game Mode..."
     mkdir -p "$ENV_DIR"
     mkdir -p "$SESSION_DIR"
 
@@ -135,16 +135,111 @@ EOF
 #!/usr/bin/bash
 function post_gamescope_start {
     if command -v steam-tweaks > /dev/null; then steam-tweaks; fi
+    if [ -x /etc/flip-companion/touch-toggle ]; then
+        sudo /etc/flip-companion/touch-toggle enable
+    fi
     if [ -x "$HOME/.local/bin/flip-companion" ]; then
         "$HOME/.local/bin/flip-companion" --lease-socket /tmp/gamescope-lease.sock &
+    fi
+}
+function post_client_shutdown {
+    if [ -x /etc/flip-companion/touch-toggle ]; then
+        sudo /etc/flip-companion/touch-toggle disable
     fi
 }
 STEAM
     fi
     info "Wrote $SESSION_DIR/steam"
 
+    # Install touch toggle (requires root)
+    step "5/6  Setting up touchscreen input routing..."
+    echo "The bottom touchscreen must be hidden from libinput during Game Mode"
+    echo "so flip-companion can read it directly. This requires sudo."
+    echo ""
+
+    local touch_dir="/etc/flip-companion"
+    local sudoers_file="/etc/sudoers.d/flip-companion-touch"
+
+    # Prepare the files in a temp directory first, then install atomically
+    local staging
+    staging="$(mktemp -d)"
+    trap "rm -rf '$staging'" EXIT
+
+    # Touch toggle helper script
+    if [[ -f "$deploy_dir/flip-companion-touch-toggle" ]]; then
+        cp "$deploy_dir/flip-companion-touch-toggle" "$staging/touch-toggle"
+    else
+        cat > "$staging/touch-toggle" << 'TOGGLE'
+#!/bin/bash
+set -euo pipefail
+readonly RULE_SRC="/etc/flip-companion/99-flip-companion-touch.rules"
+readonly RULE_DST="/run/udev/rules.d/99-flip-companion-touch.rules"
+case "${1:-}" in
+    enable)
+        [ -f "$RULE_SRC" ] || { echo "source rule not found: $RULE_SRC" >&2; exit 1; }
+        cp "$RULE_SRC" "$RULE_DST"
+        udevadm control --reload-rules
+        udevadm trigger --subsystem-match=input
+        echo "flip-companion-touch-toggle: enabled"
+        ;;
+    disable)
+        rm -f "$RULE_DST"
+        udevadm control --reload-rules
+        udevadm trigger --subsystem-match=input
+        echo "flip-companion-touch-toggle: disabled"
+        ;;
+    *) echo "Usage: $0 {enable|disable}" >&2; exit 1 ;;
+esac
+TOGGLE
+    fi
+
+    # Udev rule source
+    if [[ -f "$SCRIPT_DIR/deploy/99-flip-companion-touch.rules" ]]; then
+        cp "$SCRIPT_DIR/deploy/99-flip-companion-touch.rules" "$staging/99-flip-companion-touch.rules"
+    else
+        cat > "$staging/99-flip-companion-touch.rules" << 'UDEVRULE'
+SUBSYSTEM=="input", ATTRS{name}=="Goodix Capacitive TouchScreen", ENV{LIBINPUT_IGNORE_DEVICE}="1"
+UDEVRULE
+    fi
+
+    # Sudoers drop-in
+    if [[ -f "$deploy_dir/flip-companion-touch-sudoers" ]]; then
+        cp "$deploy_dir/flip-companion-touch-sudoers" "$staging/sudoers"
+    else
+        cat > "$staging/sudoers" << 'SUDOERS'
+%input ALL=(root) NOPASSWD: /etc/flip-companion/touch-toggle enable
+%input ALL=(root) NOPASSWD: /etc/flip-companion/touch-toggle disable
+SUDOERS
+    fi
+
+    # Validate the sudoers file before installing (prevents lockouts)
+    if ! visudo -c -f "$staging/sudoers" >/dev/null 2>&1; then
+        error "Sudoers validation failed — skipping touch toggle setup."
+        error "Touch on the bottom screen will not work in Game Mode."
+        warn "You can retry by running: sudo visudo -c -f $deploy_dir/flip-companion-touch-sudoers"
+    else
+        # Install with locked-down permissions via sudo
+        sudo mkdir -p "$touch_dir"
+        sudo cp "$staging/touch-toggle" "$touch_dir/touch-toggle"
+        sudo cp "$staging/99-flip-companion-touch.rules" "$touch_dir/99-flip-companion-touch.rules"
+        sudo chown root:root "$touch_dir/touch-toggle" "$touch_dir/99-flip-companion-touch.rules"
+        sudo chmod 755 "$touch_dir/touch-toggle"
+        sudo chmod 644 "$touch_dir/99-flip-companion-touch.rules"
+
+        sudo cp "$staging/sudoers" "$sudoers_file"
+        sudo chown root:root "$sudoers_file"
+        sudo chmod 440 "$sudoers_file"
+
+        info "Installed $touch_dir/touch-toggle (root:root 755)"
+        info "Installed $touch_dir/99-flip-companion-touch.rules (root:root 644)"
+        info "Installed $sudoers_file (root:root 440)"
+    fi
+
+    rm -rf "$staging"
+    trap - EXIT
+
     # Summary
-    step "5/5  Done!"
+    step "6/6  Done!"
     echo ""
     echo -e "  ${GREEN}gamescope${NC}          → $INSTALL_DIR/gamescope"
     echo -e "  ${GREEN}flip-companion${NC}     → $INSTALL_DIR/flip-companion"
@@ -152,7 +247,11 @@ STEAM
     echo -e "  ${GREEN}session config${NC}     → $ENV_DIR/10-gamescope-session.conf"
     echo -e "  ${GREEN}session config${NC}     → $ENV_DIR/20-gamescope-lease.conf"
     echo -e "  ${GREEN}startup hook${NC}       → $SESSION_DIR/steam"
+    echo -e "  ${GREEN}touch toggle${NC}       → /etc/flip-companion/touch-toggle"
+    echo -e "  ${GREEN}touch udev rule${NC}    → /etc/flip-companion/99-flip-companion-touch.rules"
+    echo -e "  ${GREEN}touch sudoers${NC}      → /etc/sudoers.d/flip-companion-touch"
     echo ""
+    warn "Your user must be in the 'input' group (check with: id)"
     info "Reboot into Game Mode to activate the bottom screen."
     echo ""
     echo -e "  To uninstall:  ${BOLD}./install.sh --uninstall${NC}"
@@ -166,6 +265,7 @@ STEAM
 do_uninstall() {
     step "Uninstalling Flip Companion..."
 
+    # User-level files
     local files=(
         "$INSTALL_DIR/flip-companion"
         "$INSTALL_DIR/gamescope"
@@ -185,6 +285,26 @@ do_uninstall() {
     # Clean up empty directories
     rmdir "$SESSION_DIR" 2>/dev/null || true
     rmdir "$CONFIG_DIR/gamescope-session-plus" 2>/dev/null || true
+
+    # Root-level files (touch toggle)
+    step "Removing touch toggle (requires sudo)..."
+    local root_files=(
+        "/etc/sudoers.d/flip-companion-touch"
+        "/run/udev/rules.d/99-flip-companion-touch.rules"
+    )
+    for f in "${root_files[@]}"; do
+        if [[ -f "$f" ]]; then
+            sudo rm -f "$f"
+            info "Removed $f"
+        fi
+    done
+    if [[ -d "/etc/flip-companion" ]]; then
+        sudo rm -rf "/etc/flip-companion"
+        info "Removed /etc/flip-companion/"
+    fi
+    # Reload udev so libinput picks up the touchscreen again
+    sudo udevadm control --reload-rules 2>/dev/null || true
+    sudo udevadm trigger --subsystem-match=input 2>/dev/null || true
 
     echo ""
     info "Uninstall complete. Reboot to restore stock Game Mode."
