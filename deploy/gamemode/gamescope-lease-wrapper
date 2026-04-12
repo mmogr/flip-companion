@@ -1,6 +1,10 @@
 #!/bin/bash
-# Wrapper that invokes the forked gamescope with --lease-connector DP-1
+# Wrapper that invokes the forked gamescope with --lease-connector
 # for dual-screen support on AYANEO Flip DS.
+#
+# NOTE: install.sh generates this file with the detected connector name.
+# This template uses DP-1 as the default. If your bottom screen uses a
+# different connector (e.g. DP-2), install.sh will detect it automatically.
 #
 # Installed by install.sh → ~/.local/bin/gamescope-lease-wrapper
 # Referenced by environment.d/20-gamescope-lease.conf

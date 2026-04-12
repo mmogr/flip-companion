@@ -11,8 +11,9 @@ set -euo pipefail
 #   - Bazzite session configs to wire them together
 #
 # Usage:
-#   ./install.sh              Install everything
-#   ./install.sh --uninstall  Remove everything and restore stock gamescope
+#   ./install.sh                Install everything
+#   ./install.sh --uninstall    Remove everything and restore stock gamescope
+#   ./install.sh --force        Skip hardware detection (for testing)
 #
 # Requirements: Bazzite (or SteamOS-based distro), curl, AYANEO Flip 1S DS
 # =============================================================================
@@ -30,9 +31,13 @@ INSTALL_DIR="$HOME/.local/bin"
 CONFIG_DIR="$HOME/.config"
 ENV_DIR="$CONFIG_DIR/environment.d"
 SESSION_DIR="$CONFIG_DIR/gamescope-session-plus/sessions.d"
+FLIP_CONFIG_DIR="$CONFIG_DIR/flip-companion"
+VERSION_FILE="$FLIP_CONFIG_DIR/version.json"
 
 # Where this script lives (if running from a git checkout)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+FORCE=false
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -67,6 +72,110 @@ download_binary() {
     chmod +x "$dest"
 }
 
+# Detect the bottom-screen DRM connector (non-eDP).
+# Returns the connector name (e.g. "DP-1", "DP-2") or empty string.
+detect_lease_connector() {
+    local connector=""
+    for card_dir in /sys/class/drm/card*-*; do
+        [[ -d "$card_dir" ]] || continue
+        local name
+        name="$(basename "$card_dir")"
+        # Skip the primary eDP panel (top screen)
+        [[ "$name" == *eDP* ]] && continue
+        # Skip disconnected connectors
+        local status
+        status="$(cat "$card_dir/status" 2>/dev/null || echo "disconnected")"
+        [[ "$status" == "connected" ]] || continue
+        # Extract connector name: card0-DP-1 → DP-1, card1-DP-1 → DP-1
+        # Single '#' = shortest match, so card*- strips just "cardN-"
+        connector="${name#card*-}"
+        break
+    done
+    echo "$connector"
+}
+
+# ---------------------------------------------------------------------------
+# Preflight Checks
+# ---------------------------------------------------------------------------
+
+preflight_checks() {
+    local errors=0
+
+    step "Preflight checks..."
+
+    # 1. Hardware detection — check DMI product name
+    local product_name=""
+    if [[ -r /sys/class/dmi/id/product_name ]]; then
+        product_name="$(cat /sys/class/dmi/id/product_name)"
+    fi
+    if [[ "$product_name" == *"FLIP"*"DS"* ]]; then
+        info "Hardware: $product_name"
+    elif [[ "$FORCE" == true ]]; then
+        warn "Hardware: ${product_name:-unknown} (not AYANEO Flip DS — continuing with --force)"
+    else
+        error "Hardware: ${product_name:-unknown}"
+        error "This installer is for AYANEO Flip DS handhelds only."
+        error "If you know what you're doing, re-run with --force"
+        return 1
+    fi
+
+    # 2. Bazzite / SteamOS detection — check for gamescope-session-plus
+    if command -v gamescope-session-plus >/dev/null 2>&1 || \
+       [[ -f /usr/share/gamescope-session-plus/gamescope-session-plus ]]; then
+        info "Session: gamescope-session-plus found"
+    else
+        error "gamescope-session-plus not found."
+        error "This installer requires Bazzite or a SteamOS-based distro."
+        return 1
+    fi
+
+    # 3. Check curl is available (needed for downloads)
+    if command -v curl >/dev/null 2>&1; then
+        info "curl: available"
+    else
+        error "curl is required but not found."
+        return 1
+    fi
+
+    # 4. Check ~/.local/bin is in PATH
+    if echo "$PATH" | tr ':' '\n' | grep -qx "$HOME/.local/bin"; then
+        info "PATH: ~/.local/bin is in PATH"
+    else
+        warn "~/.local/bin is not in PATH (gamescope wrapper uses absolute paths, so this is OK)"
+    fi
+
+    # 5. Detect the bottom-screen connector
+    local connector
+    connector="$(detect_lease_connector)"
+    if [[ -n "$connector" ]]; then
+        info "Bottom screen: $connector"
+    else
+        warn "No non-eDP connector detected (screen may be off — will default to DP-1)"
+        connector="DP-1"
+    fi
+    # Export for use by do_install
+    LEASE_CONNECTOR="$connector"
+
+    # 6. Check user is in the 'input' group
+    if id -nG | tr ' ' '\n' | grep -qx "input"; then
+        info "Group: user is in 'input' group"
+    else
+        warn "Your user is NOT in the 'input' group."
+        warn "Touch on the bottom screen requires this group membership."
+        echo ""
+        read -rp "  Add $(whoami) to 'input' group now? [Y/n] " add_input
+        if [[ "${add_input,,}" != "n" ]]; then
+            sudo usermod -aG input "$(whoami)"
+            info "Added $(whoami) to 'input' group (takes effect after reboot/re-login)"
+        else
+            warn "Skipped. You can add it later with: sudo usermod -aG input $(whoami)"
+            warn "Touch will not work on the bottom screen without this."
+        fi
+    fi
+
+    return $errors
+}
+
 # ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
@@ -76,8 +185,29 @@ do_install() {
     echo "This will set up dual-screen Game Mode on Bazzite."
     echo ""
 
-    # Resolve versions
-    step "1/6  Resolving release versions..."
+    # Run preflight checks (exits on failure unless --force)
+    if ! preflight_checks; then
+        exit 1
+    fi
+
+    # Show upgrade info if a previous install exists
+    if [[ -f "$VERSION_FILE" ]]; then
+        echo ""
+        info "Previous installation detected:"
+        echo -e "  companion: $(grep -o '"companion":"[^"]*"' "$VERSION_FILE" | cut -d'"' -f4)"
+        echo -e "  gamescope: $(grep -o '"gamescope":"[^"]*"' "$VERSION_FILE" | cut -d'"' -f4)"
+        echo -e "  installed: $(grep -o '"installed":"[^"]*"' "$VERSION_FILE" | cut -d'"' -f4)"
+        echo ""
+    fi
+
+    # Create a staging directory — everything is staged here first.
+    # If any step fails, nothing is half-installed.
+    local staging
+    staging="$(mktemp -d)"
+    trap 'rm -rf "$staging"' EXIT
+
+    # ── 1. Resolve versions ──────────────────────────────────────────────
+    step "1/7  Resolving release versions..."
     local comp_tag game_tag
     comp_tag="$(resolve_version "$COMPANION_REPO" "$COMPANION_VERSION")"
     game_tag="$(resolve_version "$GAMESCOPE_REPO" "$GAMESCOPE_VERSION")"
@@ -90,31 +220,94 @@ do_install() {
     info "flip-companion: ${comp_tag}"
     info "gamescope:      ${game_tag}"
 
-    # Download binaries
-    step "2/6  Downloading binaries..."
-    mkdir -p "$INSTALL_DIR"
-    download_binary "$COMPANION_REPO" "$comp_tag" "flip-companion" "$INSTALL_DIR/flip-companion"
-    download_binary "$GAMESCOPE_REPO" "$game_tag"  "gamescope"      "$INSTALL_DIR/gamescope"
+    # ── 2. Download binaries to staging ──────────────────────────────────
+    step "2/7  Downloading binaries..."
+    download_binary "$COMPANION_REPO" "$comp_tag" "flip-companion" "$staging/flip-companion"
+    download_binary "$GAMESCOPE_REPO" "$game_tag"  "gamescope"      "$staging/gamescope"
 
-    # Install wrapper script
-    step "3/6  Installing gamescope wrapper..."
-    local deploy_dir="$SCRIPT_DIR/deploy/gamemode"
-    if [[ -f "$deploy_dir/gamescope-lease-wrapper" ]]; then
-        cp "$deploy_dir/gamescope-lease-wrapper" "$INSTALL_DIR/gamescope-lease-wrapper"
-    else
-        # Inline fallback if running from curl|bash (no git checkout)
-        cat > "$INSTALL_DIR/gamescope-lease-wrapper" << 'WRAPPER'
-#!/bin/bash
-exec "$HOME/.local/bin/gamescope" --lease-connector DP-1 --ignore-touch-device Goodix "$@"
-WRAPPER
+    # ── 3. Verify checksums (if available) ───────────────────────────────
+    step "3/7  Verifying checksums..."
+    local checksums_ok=true
+    for repo_tag in "$COMPANION_REPO:$comp_tag" "$GAMESCOPE_REPO:$game_tag"; do
+        local repo="${repo_tag%%:*}"
+        local tag="${repo_tag##*:}"
+        local sums_url="https://github.com/${REPO_OWNER}/${repo}/releases/download/${tag}/SHA256SUMS"
+        local sums_file="$staging/${repo}-SHA256SUMS"
+
+        if curl -fsSL -o "$sums_file" "$sums_url" 2>/dev/null; then
+            local binary_name
+            if [[ "$repo" == "$COMPANION_REPO" ]]; then
+                binary_name="flip-companion"
+            else
+                binary_name="gamescope"
+            fi
+            local expected
+            expected="$(grep "$binary_name" "$sums_file" | awk '{print $1}')"
+            local actual
+            actual="$(sha256sum "$staging/$binary_name" | awk '{print $1}')"
+            if [[ "$expected" == "$actual" ]]; then
+                info "$binary_name: checksum OK"
+            else
+                error "$binary_name: checksum MISMATCH"
+                error "  expected: $expected"
+                error "  actual:   $actual"
+                checksums_ok=false
+            fi
+        else
+            warn "$repo ($tag): no SHA256SUMS found — skipping verification"
+        fi
+    done
+    if [[ "$checksums_ok" != true ]]; then
+        error "Checksum verification failed. Aborting."
+        exit 1
     fi
-    chmod +x "$INSTALL_DIR/gamescope-lease-wrapper"
-    info "Installed gamescope-lease-wrapper"
 
-    # Install session configs
-    step "4/6  Configuring Bazzite Game Mode..."
+    # ── 4. Check shared library compatibility ────────────────────────────
+    step "4/7  Checking binary compatibility..."
+    if command -v ldd >/dev/null 2>&1; then
+        local missing_libs
+        missing_libs="$(ldd "$staging/gamescope" 2>/dev/null | grep "not found" || true)"
+        if [[ -n "$missing_libs" ]]; then
+            warn "Some shared libraries are missing on this system:"
+            echo "$missing_libs" | while read -r line; do
+                warn "  $line"
+            done
+            warn "Gamescope may fail to start. Please report this if it does."
+        else
+            info "gamescope: all shared libraries found"
+        fi
+    else
+        warn "ldd not available — skipping library check"
+    fi
+    info "flip-companion: statically linked (OK)"
+
+    # ── 5. Install binaries + wrapper ────────────────────────────────────
+    step "5/7  Installing binaries and wrapper..."
+    mkdir -p "$INSTALL_DIR"
+
+    # Atomic install: copy to staging name in target dir, then rename
+    cp "$staging/flip-companion" "$INSTALL_DIR/.flip-companion.new"
+    mv -f "$INSTALL_DIR/.flip-companion.new" "$INSTALL_DIR/flip-companion"
+    info "Installed flip-companion → $INSTALL_DIR/"
+
+    cp "$staging/gamescope" "$INSTALL_DIR/.gamescope.new"
+    mv -f "$INSTALL_DIR/.gamescope.new" "$INSTALL_DIR/gamescope"
+    info "Installed gamescope → $INSTALL_DIR/"
+
+    # Generate the wrapper with the detected connector
+    local deploy_dir="$SCRIPT_DIR/deploy/gamemode"
+    cat > "$INSTALL_DIR/gamescope-lease-wrapper" << WRAPPER
+#!/bin/bash
+exec "\$HOME/.local/bin/gamescope" --lease-connector ${LEASE_CONNECTOR} --ignore-touch-device Goodix "\$@"
+WRAPPER
+    chmod +x "$INSTALL_DIR/gamescope-lease-wrapper"
+    info "Installed gamescope-lease-wrapper (connector: ${LEASE_CONNECTOR})"
+
+    # ── 6. Configure session ─────────────────────────────────────────────
+    step "6/7  Configuring Bazzite Game Mode..."
     mkdir -p "$ENV_DIR"
     mkdir -p "$SESSION_DIR"
+    mkdir -p "$FLIP_CONFIG_DIR"
 
     # environment.d
     cat > "$ENV_DIR/10-gamescope-session.conf" << 'EOF'
@@ -126,6 +319,12 @@ EOF
 GAMESCOPE_BIN=\${HOME}/.local/bin/gamescope-lease-wrapper
 EOF
     info "Wrote $ENV_DIR/20-gamescope-lease.conf"
+
+    # Back up existing sessions.d/steam if not already backed up by us
+    if [[ -f "$SESSION_DIR/steam" && ! -f "$SESSION_DIR/steam.pre-flip-companion.bak" ]]; then
+        cp "$SESSION_DIR/steam" "$SESSION_DIR/steam.pre-flip-companion.bak"
+        info "Backed up existing $SESSION_DIR/steam → steam.pre-flip-companion.bak"
+    fi
 
     # sessions.d/steam hook
     if [[ -f "$deploy_dir/sessions.d-steam" ]]; then
@@ -152,18 +351,13 @@ STEAM
     info "Wrote $SESSION_DIR/steam"
 
     # Install touch toggle (requires root)
-    step "5/6  Setting up touchscreen input routing..."
+    echo ""
     echo "The bottom touchscreen must be hidden from libinput during Game Mode"
     echo "so flip-companion can read it directly. This requires sudo."
     echo ""
 
     local touch_dir="/etc/flip-companion"
     local sudoers_file="/etc/sudoers.d/flip-companion-touch"
-
-    # Prepare the files in a temp directory first, then install atomically
-    local staging
-    staging="$(mktemp -d)"
-    trap "rm -rf '$staging'" EXIT
 
     # Touch toggle helper script
     if [[ -f "$deploy_dir/flip-companion-touch-toggle" ]]; then
@@ -235,23 +429,29 @@ SUDOERS
         info "Installed $sudoers_file (root:root 440)"
     fi
 
+    # Write version file for upgrade tracking
+    cat > "$VERSION_FILE" << VEOF
+{"companion":"${comp_tag}","gamescope":"${game_tag}","connector":"${LEASE_CONNECTOR}","installed":"$(date -I)"}
+VEOF
+    info "Version info → $VERSION_FILE"
+
     rm -rf "$staging"
     trap - EXIT
 
-    # Summary
-    step "6/6  Done!"
+    # ── 7. Summary ───────────────────────────────────────────────────────
+    step "7/7  Done!"
     echo ""
     echo -e "  ${GREEN}gamescope${NC}          → $INSTALL_DIR/gamescope"
     echo -e "  ${GREEN}flip-companion${NC}     → $INSTALL_DIR/flip-companion"
-    echo -e "  ${GREEN}lease wrapper${NC}      → $INSTALL_DIR/gamescope-lease-wrapper"
+    echo -e "  ${GREEN}lease wrapper${NC}      → $INSTALL_DIR/gamescope-lease-wrapper (${LEASE_CONNECTOR})"
     echo -e "  ${GREEN}session config${NC}     → $ENV_DIR/10-gamescope-session.conf"
     echo -e "  ${GREEN}session config${NC}     → $ENV_DIR/20-gamescope-lease.conf"
     echo -e "  ${GREEN}startup hook${NC}       → $SESSION_DIR/steam"
     echo -e "  ${GREEN}touch toggle${NC}       → /etc/flip-companion/touch-toggle"
     echo -e "  ${GREEN}touch udev rule${NC}    → /etc/flip-companion/99-flip-companion-touch.rules"
     echo -e "  ${GREEN}touch sudoers${NC}      → /etc/sudoers.d/flip-companion-touch"
+    echo -e "  ${GREEN}version info${NC}       → $VERSION_FILE"
     echo ""
-    warn "Your user must be in the 'input' group (check with: id)"
     info "Reboot into Game Mode to activate the bottom screen."
     echo ""
     echo -e "  To uninstall:  ${BOLD}./install.sh --uninstall${NC}"
@@ -272,7 +472,6 @@ do_uninstall() {
         "$INSTALL_DIR/gamescope-lease-wrapper"
         "$ENV_DIR/10-gamescope-session.conf"
         "$ENV_DIR/20-gamescope-lease.conf"
-        "$SESSION_DIR/steam"
     )
 
     for f in "${files[@]}"; do
@@ -281,6 +480,22 @@ do_uninstall() {
             info "Removed $f"
         fi
     done
+
+    # Restore backed-up sessions.d/steam, or remove ours
+    if [[ -f "$SESSION_DIR/steam.pre-flip-companion.bak" ]]; then
+        mv "$SESSION_DIR/steam.pre-flip-companion.bak" "$SESSION_DIR/steam"
+        info "Restored $SESSION_DIR/steam from backup"
+    elif [[ -f "$SESSION_DIR/steam" ]]; then
+        rm -f "$SESSION_DIR/steam"
+        info "Removed $SESSION_DIR/steam"
+    fi
+
+    # Remove version tracking
+    if [[ -f "$VERSION_FILE" ]]; then
+        rm -f "$VERSION_FILE"
+        info "Removed $VERSION_FILE"
+    fi
+    rmdir "$FLIP_CONFIG_DIR" 2>/dev/null || true
 
     # Clean up empty directories
     rmdir "$SESSION_DIR" 2>/dev/null || true
@@ -314,18 +529,29 @@ do_uninstall() {
 # Main
 # ---------------------------------------------------------------------------
 
+# Parse flags
+for arg in "$@"; do
+    case "$arg" in
+        --force|-f) FORCE=true ;;
+    esac
+done
+
 case "${1:-}" in
     --uninstall|-u)
         do_uninstall
         ;;
     --help|-h)
-        echo "Usage: $0 [--uninstall]"
+        echo "Usage: $0 [--uninstall] [--force]"
         echo ""
         echo "Installs dual-screen Game Mode for AYANEO Flip 1S DS on Bazzite."
         echo ""
         echo "Options:"
         echo "  --uninstall  Remove all installed files and restore stock gamescope"
+        echo "  --force      Skip hardware detection (for testing on non-DS hardware)"
         echo "  --help       Show this help"
+        ;;
+    --force|-f)
+        do_install
         ;;
     *)
         do_install

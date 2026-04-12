@@ -33,11 +33,17 @@ jobs:
       - name: Strip binary
         run: strip target/release/flip-companion
 
+      - name: Generate checksums
+        run: |
+          cd target/release
+          sha256sum flip-companion > SHA256SUMS
+
       - name: Upload release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             target/release/flip-companion
+            target/release/SHA256SUMS
             install.sh
           body: |
             ## Install on Bazzite (AYANEO Flip 1S DS)
