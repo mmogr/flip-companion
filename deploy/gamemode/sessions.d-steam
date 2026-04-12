@@ -1,0 +1,19 @@
+#!/usr/bin/bash
+# User override for gamescope-session-plus steam session.
+# Launches flip-companion on the bottom screen after gamescope starts.
+#
+# Installed to: ~/.config/gamescope-session-plus/sessions.d/steam
+# The upstream file at /usr/share/gamescope-session-plus/sessions.d/steam
+# is sourced first; this file is sourced after and redefines the function.
+
+function post_gamescope_start {
+    # Preserve upstream behavior: run steam-tweaks
+    if command -v steam-tweaks > /dev/null; then
+        steam-tweaks
+    fi
+
+    # Launch flip-companion on the bottom screen via DRM lease
+    if [ -x "$HOME/.local/bin/flip-companion" ]; then
+        "$HOME/.local/bin/flip-companion" --lease-socket /tmp/gamescope-lease.sock &
+    fi
+}

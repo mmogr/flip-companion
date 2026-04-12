@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build flip-companion
+    runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:41
+
+    steps:
+      - name: Install system deps
+        run: |
+          dnf install -y \
+            gcc gcc-c++ pkg-config \
+            libdrm-devel libinput-devel systemd-devel \
+            wayland-devel wayland-protocols-devel \
+            libxkbcommon-devel dbus-devel \
+            rust cargo git
+
+      - uses: actions/checkout@v4
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Strip binary
+        run: strip target/release/flip-companion
+
+      - name: Upload release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/release/flip-companion
+            install.sh
+          body: |
+            ## Install on Bazzite (AYANEO Flip 1S DS)
+
+            ```bash
+            curl -sL https://github.com/mmogr/flip-companion/raw/main/install.sh | bash
+            ```
+
+            Or download `flip-companion` and `install.sh` manually and run `./install.sh`.
+
+            See [README](https://github.com/mmogr/flip-companion#readme) for details.
