@@ -196,12 +196,14 @@ fn spawn_touch_thread(
 
                                     if ev.value() == 1 {
                                         is_down = true;
+                                        eprintln!("[touch] DOWN raw=({},{}) logical=({:.0},{:.0})", cur_x, cur_y, lx, ly);
                                         let _ = tx.send(TouchEvent::Down {
                                             x: lx,
                                             y: ly,
                                         });
                                     } else {
                                         is_down = false;
+                                        eprintln!("[touch] UP");
                                         let _ = tx.send(TouchEvent::Up);
                                     }
                                 }

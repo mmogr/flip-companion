@@ -11,6 +11,10 @@ export global StatsStore {
     in-out property <float> mem-total-gb: 16;
     in-out property <float> battery-percent: 0;
     in-out property <bool> battery-charging: false;
+    in-out property <string> clock-text: "--:--";
+    in-out property <[float]> cpu-history;
+    in-out property <[float]> gpu-history;
+    in-out property <[float]> mem-history;
 }
 
 // A single entry in the window list shown by the shuttle panel.

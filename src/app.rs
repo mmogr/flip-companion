@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 use crate::platform::input::InputInjector;
 use crate::platform::stats::StatsProvider;
 use crate::platform::window::WindowManager;
+use crate::stats_history::StatsHistory;
 use crate::types::window::ShuttleDirection;
 
 slint::include_modules!();
@@ -30,11 +31,12 @@ pub async fn backend_loop(
     windows: Box<dyn WindowManager>,
 ) {
     let mut stats_interval = tokio::time::interval(Duration::from_secs(1));
+    let mut history = StatsHistory::new();
 
     loop {
         tokio::select! {
             _ = stats_interval.tick() => {
-                handle_stats_tick(&mut *stats, &app_weak).await;
+                handle_stats_tick(&mut *stats, &app_weak, &mut history).await;
             }
             cmd = rx.recv() => {
                 match cmd {
@@ -54,9 +56,29 @@ pub async fn backend_loop(
     }
 }
 
-async fn handle_stats_tick(stats: &mut dyn StatsProvider, app_weak: &slint::Weak<App>) {
+async fn handle_stats_tick(
+    stats: &mut dyn StatsProvider,
+    app_weak: &slint::Weak<App>,
+    history: &mut StatsHistory,
+) {
     match stats.snapshot().await {
         Ok(snap) => {
+            let mem_pct = if snap.memory.total_bytes > 0 {
+                snap.memory.used_bytes as f32 / snap.memory.total_bytes as f32 * 100.0
+            } else {
+                0.0
+            };
+            history.push(
+                snap.cpu.usage_percent,
+                snap.gpu.usage_percent.unwrap_or(0.0),
+                mem_pct,
+            );
+
+            let clock = SharedString::from(crate::stats_history::clock_text());
+            let cpu_hist = history.cpu_history();
+            let gpu_hist = history.gpu_history();
+            let mem_hist = history.mem_history();
+
             let _ = app_weak.upgrade_in_event_loop(move |app| {
                 let store = app.global::<StatsStore>();
                 store.set_cpu_usage(snap.cpu.usage_percent);
@@ -67,6 +89,10 @@ async fn handle_stats_tick(stats: &mut dyn StatsProvider, app_weak: &slint::Weak
                 store.set_mem_total_gb(snap.memory.total_bytes as f32 / 1_073_741_824.0);
                 store.set_battery_percent(snap.battery.charge_percent.unwrap_or(0.0));
                 store.set_battery_charging(snap.battery.charging);
+                store.set_clock_text(clock);
+                store.set_cpu_history(ModelRc::new(VecModel::from(cpu_hist)));
+                store.set_gpu_history(ModelRc::new(VecModel::from(gpu_hist)));
+                store.set_mem_history(ModelRc::new(VecModel::from(mem_hist)));
             });
         }
         Err(e) => eprintln!("[stats] error: {e}"),

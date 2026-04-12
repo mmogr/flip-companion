@@ -5,6 +5,7 @@
 import { Keyboard } from "keyboard.slint";
 import { Stats } from "stats.slint";
 import { Shuttle } from "shuttle.slint";
+import { TopBar } from "top_bar.slint";
 import { StatsStore } from "globals.slint";
 import { ShuttleStore } from "globals.slint";
 export { StatsStore }
@@ -47,6 +48,9 @@ export component App inherits Window {
     callback request-refresh();
 
     VerticalLayout {
+        // Top status bar — always visible
+        TopBar {}
+
         // Content area — fills available space
         Rectangle {
             vertical-stretch: 1;

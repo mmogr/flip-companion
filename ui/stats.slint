@@ -1,74 +1,101 @@
-// Stats panel — system stats dashboard.
+// Stats panel — AyaSpace-inspired 2×3 dashboard grid.
 
 import { StatsStore } from "globals.slint";
-
-component StatRow inherits Rectangle {
-    in property <string> label;
-    in property <string> value;
-    in property <float> percent;
-
-    height: 44px;
-    background: #16213e;
-    border-radius: 6px;
-
-    HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 12px;
-        alignment: space-between;
-
-        Text {
-            text: label;
-            font-size: 14px;
-            color: #a0a0b8;
-            vertical-alignment: center;
-        }
-        Text {
-            text: value;
-            font-size: 14px;
-            color: #e0e0f0;
-            vertical-alignment: center;
-        }
-    }
-
-    // Progress bar overlay
-    Rectangle {
-        x: 0;
-        y: parent.height - 3px;
-        height: 3px;
-        width: parent.width * clamp(percent, 0, 1);
-        background: percent > 0.85 ? #e94560 : percent > 0.6 ? #f0a500 : #0f3460;
-        border-radius: 1.5px;
-    }
-}
+import { StatCard } from "stat_card.slint";
 
 export component Stats inherits Rectangle {
     background: #1a1a2e;
 
+    // Color helpers — pure functions for threshold-based accent colors.
+    pure function pct-color(val: float) -> color {
+        if val >= 85 { return #e94560; }
+        if val >= 60 { return #f0a500; }
+        return #2ecc71;
+    }
+
+    pure function temp-color(val: float) -> color {
+        if val >= 85 { return #e94560; }
+        if val >= 65 { return #f0a500; }
+        return #2ecc71;
+    }
+
     VerticalLayout {
-        alignment: start;
-        padding: 16px;
-        spacing: 12px;
+        padding: 12px;
+        spacing: 10px;
 
-        Text {
-            text: "System Stats";
-            font-size: 20px;
-            color: #e0e0f0;
-            horizontal-alignment: center;
+        // Row 1: CPU | GPU (with sparklines)
+        HorizontalLayout {
+            spacing: 10px;
+            vertical-stretch: 1;
+
+            StatCard {
+                horizontal-stretch: 1;
+                label: "🖥  CPU";
+                value-text: Math.round(StatsStore.cpu-usage) + "%";
+                accent-color: pct-color(StatsStore.cpu-usage);
+                has-sparkline: true;
+                sparkline-data: StatsStore.cpu-history;
+            }
+            StatCard {
+                horizontal-stretch: 1;
+                label: "🎮  GPU";
+                value-text: Math.round(StatsStore.gpu-usage) + "%";
+                accent-color: pct-color(StatsStore.gpu-usage);
+                has-sparkline: true;
+                sparkline-data: StatsStore.gpu-history;
+            }
         }
 
-        StatRow { label: "CPU"; value: Math.round(StatsStore.cpu-usage) + "%"; percent: StatsStore.cpu-usage / 100; }
-        StatRow { label: "CPU Temp"; value: Math.round(StatsStore.cpu-temp) + "°C"; percent: StatsStore.cpu-temp / 100; }
-        StatRow { label: "GPU"; value: Math.round(StatsStore.gpu-usage) + "%"; percent: StatsStore.gpu-usage / 100; }
-        StatRow { label: "GPU Temp"; value: Math.round(StatsStore.gpu-temp) + "°C"; percent: StatsStore.gpu-temp / 100; }
-        StatRow {
-            label: "RAM";
-            value: Math.round(StatsStore.mem-used-gb * 10) / 10 + " / " + Math.round(StatsStore.mem-total-gb * 10) / 10 + " GB";
-            percent: StatsStore.mem-total-gb > 0 ? StatsStore.mem-used-gb / StatsStore.mem-total-gb : 0;
+        // Row 2: CPU Temp | GPU Temp (no sparklines)
+        HorizontalLayout {
+            spacing: 10px;
+            vertical-stretch: 1;
+
+            StatCard {
+                horizontal-stretch: 1;
+                label: "🌡  CPU Temp";
+                value-text: Math.round(StatsStore.cpu-temp) + "°C";
+                accent-color: temp-color(StatsStore.cpu-temp);
+            }
+            StatCard {
+                horizontal-stretch: 1;
+                label: "🌡  GPU Temp";
+                value-text: Math.round(StatsStore.gpu-temp) + "°C";
+                accent-color: temp-color(StatsStore.gpu-temp);
+            }
         }
-        StatRow {
-            label: StatsStore.battery-charging ? "Battery ⚡" : "Battery";
-            value: Math.round(StatsStore.battery-percent) + "%";
-            percent: StatsStore.battery-percent / 100;
+
+        // Row 3: RAM (with sparkline) | Placeholder
+        HorizontalLayout {
+            spacing: 10px;
+            vertical-stretch: 1;
+
+            StatCard {
+                horizontal-stretch: 1;
+                label: "💾  RAM";
+                value-text: Math.round(StatsStore.mem-used-gb * 10) / 10 + " / " + Math.round(StatsStore.mem-total-gb * 10) / 10 + " GB";
+                accent-color: StatsStore.mem-total-gb > 0
+                    ? pct-color(StatsStore.mem-used-gb / StatsStore.mem-total-gb * 100)
+                    : #2ecc71;
+                has-sparkline: true;
+                sparkline-data: StatsStore.mem-history;
+            }
+
+            // Placeholder for future FPS card
+            Rectangle {
+                horizontal-stretch: 1;
+                background: #16213e;
+                border-radius: 10px;
+                opacity: 0.3;
+
+                Text {
+                    text: "FPS\n(coming soon)";
+                    font-size: 14px;
+                    color: #a0a0b8;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
         }
     }
 }

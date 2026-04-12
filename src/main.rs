@@ -10,6 +10,7 @@ mod app;
 pub mod backend;
 mod config;
 pub mod platform;
+mod stats_history;
 pub mod types;
 
 use app::{App, StatsStore, UICommand};
@@ -193,9 +194,29 @@ fn run_game_mode(socket_path: &str) {
     // Register a callback that the render loop calls (on this thread) to
     // push snapshot data into Slint StatsStore properties.
     let store_app = app.as_weak();
+    let history = std::cell::RefCell::new(stats_history::StatsHistory::new());
     backend::drm_platform::set_stats_callback(Box::new(move |snap| {
         if let Some(app) = store_app.upgrade() {
             let store = app.global::<StatsStore>();
+
+            let mem_pct = if snap.memory.total_bytes > 0 {
+                snap.memory.used_bytes as f32 / snap.memory.total_bytes as f32 * 100.0
+            } else {
+                0.0
+            };
+            {
+                let mut h = history.borrow_mut();
+                h.push(
+                    snap.cpu.usage_percent,
+                    snap.gpu.usage_percent.unwrap_or(0.0),
+                    mem_pct,
+                );
+                store.set_clock_text(slint::SharedString::from(stats_history::clock_text()));
+                store.set_cpu_history(slint::ModelRc::new(slint::VecModel::from(h.cpu_history())));
+                store.set_gpu_history(slint::ModelRc::new(slint::VecModel::from(h.gpu_history())));
+                store.set_mem_history(slint::ModelRc::new(slint::VecModel::from(h.mem_history())));
+            }
+
             store.set_cpu_usage(snap.cpu.usage_percent);
             store.set_cpu_temp(snap.cpu.temp_celsius.unwrap_or(0.0));
             store.set_gpu_usage(snap.gpu.usage_percent.unwrap_or(0.0));

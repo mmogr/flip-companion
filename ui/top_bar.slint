@@ -1,0 +1,43 @@
+// Top status bar — clock, game name, battery indicator.
+
+import { StatsStore } from "globals.slint";
+
+export component TopBar inherits Rectangle {
+    height: 40px;
+    background: #16213e;
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        alignment: space-between;
+
+        // Left: clock
+        Text {
+            text: StatsStore.clock-text;
+            font-size: 18px;
+            color: #e0e0f0;
+            vertical-alignment: center;
+        }
+
+        // Center: game name (hardcoded for now)
+        Text {
+            text: "Steam Game Mode";
+            font-size: 16px;
+            color: #a0a0b8;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+
+        // Right: battery
+        Text {
+            text: StatsStore.battery-charging
+                ? "⚡ " + Math.round(StatsStore.battery-percent) + "%"
+                : "🔋 " + Math.round(StatsStore.battery-percent) + "%";
+            font-size: 16px;
+            color: StatsStore.battery-percent < 20 ? #e94560 : #e0e0f0;
+            vertical-alignment: center;
+        }
+    }
+}

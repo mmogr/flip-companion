@@ -1,0 +1,71 @@
+// StatCard — a dashboard card showing a metric with optional sparkline.
+//
+// Properties:
+//   label          — e.g. "🖥 CPU"
+//   value-text     — e.g. "47%"
+//   accent-color   — left stripe + sparkline bar color
+//   sparkline-data — array of float values (0–100) for bar chart
+//   has-sparkline  — whether to show the sparkline area
+
+export component StatCard inherits Rectangle {
+    in property <string> label;
+    in property <string> value-text;
+    in property <color> accent-color: #2ecc71;
+    in property <[float]> sparkline-data;
+    in property <bool> has-sparkline: false;
+
+    background: #16213e;
+    border-radius: 10px;
+    clip: true;
+
+    // Left accent stripe
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: 4px;
+        height: parent.height;
+        background: accent-color;
+        border-radius: 2px;
+    }
+
+    VerticalLayout {
+        padding-top: 12px;
+        padding-bottom: has-sparkline ? 0px : 12px;
+        padding-left: 16px;
+        padding-right: 12px;
+        spacing: 4px;
+
+        // Label row
+        Text {
+            text: label;
+            font-size: 14px;
+            color: #a0a0b8;
+        }
+
+        // Big value
+        Text {
+            text: value-text;
+            font-size: has-sparkline ? 48px : 56px;
+            font-weight: 700;
+            color: #e0e0f0;
+            vertical-alignment: center;
+            vertical-stretch: 1;
+        }
+
+        // Sparkline bar chart (only if has-sparkline)
+        if has-sparkline : Rectangle {
+            height: 60px;
+            property <length> bar-width: sparkline-data.length > 0
+                ? self.width / sparkline-data.length
+                : 10px;
+
+            for val[i] in sparkline-data : Rectangle {
+                x: i * bar-width;
+                width: max(bar-width - 1px, 1px);
+                height: max(parent.height * clamp(val / 100, 0, 1), 1px);
+                y: parent.height - self.height;
+                background: accent-color.transparentize(0.4);
+            }
+        }
+    }
+}
