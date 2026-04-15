@@ -19,6 +19,7 @@ use smithay::wayland::compositor::CompositorState;
 use smithay::wayland::dmabuf::DmabufState;
 use smithay::wayland::selection::data_device::DataDeviceState;
 use smithay::wayland::shell::xdg::XdgShellState;
+use smithay::wayland::shell::xdg::decoration::XdgDecorationState;
 use smithay::wayland::shm::ShmState;
 use smithay::wayland::socket::ListeningSocketSource;
 use smithay::wayland::viewporter::ViewporterState;
@@ -79,6 +80,7 @@ fn run(config: CompositorConfig) {
     let mut seat_state = SeatState::new();
     let data_device_state = DataDeviceState::new::<FlipCompositor>(&dh);
     let viewporter_state = ViewporterState::new::<FlipCompositor>(&dh);
+    let xdg_decoration_state = XdgDecorationState::new::<FlipCompositor>(&dh);
 
     // ── Seat with keyboard + touch + pointer ────────────────────────
     let mut seat = seat_state.new_wl_seat(&dh, "flip");
@@ -116,6 +118,7 @@ fn run(config: CompositorConfig) {
         seat_state,
         data_device_state,
         viewporter_state,
+        xdg_decoration_state,
         seat,
         output,
         toplevel: None,

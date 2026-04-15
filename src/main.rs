@@ -291,6 +291,7 @@ fn run_game_mode(socket_path: &str, config: &Config) {
                     command.arg("--nosocket=fallback-x11");
                     command.arg("--env=GDK_BACKEND=wayland");
                     command.arg("--env=MOZ_ENABLE_WAYLAND=1");
+                    command.arg("--env=GTK_CSD=0");
                     command.arg("--env=WAYLAND_DEBUG=1");
                     command.arg("--unset-env=DISPLAY");
                     for arg in &args[1..] {

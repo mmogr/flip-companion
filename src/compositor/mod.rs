@@ -29,8 +29,10 @@ use smithay::wayland::selection::data_device::{
 };
 use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::shell::xdg::{
-    PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+    PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface, XdgShellHandler, XdgShellState,
 };
+use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
+use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::utils::Serial;
@@ -182,6 +184,7 @@ pub struct FlipCompositor {
     pub seat_state: SeatState<Self>,
     pub data_device_state: DataDeviceState,
     pub viewporter_state: ViewporterState,
+    pub xdg_decoration_state: XdgDecorationState,
     pub seat: Seat<Self>,
     /// The wl_output we advertise to clients.
     pub output: smithay::output::Output,
@@ -257,6 +260,18 @@ impl CompositorHandler for FlipCompositor {
         let root = toplevel.wl_surface().clone();
         let mut layers: Vec<SurfaceLayer> = Vec::new();
 
+        // Read the xdg_surface geometry so we can offset layers to exclude CSD
+        // decorations (e.g. Firefox's title bar). The geometry rectangle tells
+        // us where the actual window content starts within the buffer.
+        let geo_offset = with_states(&root, |data| {
+            data.cached_state
+                .get::<SurfaceCachedState>()
+                .current()
+                .geometry
+                .map(|g| (g.loc.x, g.loc.y))
+                .unwrap_or((0, 0))
+        });
+
         // with_surface_tree_upward walks bottom-to-top (paint order).
         smithay::wayland::compositor::with_surface_tree_upward(
             &root,
@@ -287,7 +302,13 @@ impl CompositorHandler for FlipCompositor {
         );
 
         if !layers.is_empty() {
-            eprintln!("[compositor] commit produced {} layers", layers.len());
+            // Subtract geometry offset so layer positions are relative to the
+            // window content area, not the raw buffer (hides CSD title bar).
+            for layer in &mut layers {
+                layer.x -= geo_offset.0;
+                layer.y -= geo_offset.1;
+            }
+            eprintln!("[compositor] commit produced {} layers (geo_offset {:?})", layers.len(), geo_offset);
             *self.pending_layers.lock().unwrap_or_else(|e| e.into_inner()) = layers;
             self.render_waker.wake();
         }
@@ -329,11 +350,14 @@ impl XdgShellHandler for FlipCompositor {
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         eprintln!("[compositor] new xdg_toplevel created");
-        // Auto-maximize: configure at our content area size (1620×984 landscape).
+        // Tell the client it's fullscreen at the full output size.
+        // Firefox hides its CSD title bar in fullscreen mode but keeps the
+        // tab/address bar.  The render thread clips the surface to the
+        // visible client area (CLIENT_Y_START..CLIENT_Y_END).
         surface.with_pending_state(|state| {
-            state.size = Some((1620, 984).into());
+            state.size = Some((1620, 1080).into());
             state.states.set(
-                smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Maximized,
+                smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Fullscreen,
             );
             state.states.set(
                 smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated,
@@ -402,6 +426,29 @@ impl DataDeviceHandler for FlipCompositor {
 impl ClientDndGrabHandler for FlipCompositor {}
 impl ServerDndGrabHandler for FlipCompositor {}
 
+impl XdgDecorationHandler for FlipCompositor {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+
+    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: DecorationMode) {
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+}
+
 impl smithay::wayland::output::OutputHandler for FlipCompositor {
     fn output_bound(
         &mut self,
@@ -420,7 +467,7 @@ smithay::delegate_seat!(FlipCompositor);
 smithay::delegate_data_device!(FlipCompositor);
 smithay::delegate_output!(FlipCompositor);
 smithay::delegate_viewporter!(FlipCompositor);
-
+smithay::delegate_xdg_decoration!(FlipCompositor);
 // ── Buffer extraction helper ────────────────────────────────────────────
 
 /// Extract a buffer from a wl_buffer into a SurfaceLayer at the given offset.

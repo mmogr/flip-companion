@@ -884,20 +884,33 @@ impl Platform for DrmPlatform {
 
                         // Overdraw client surface layers in the middle region,
                         // but only when on the Apps tab (tab 2).
+                        // Layers are clipped to the client area so CSD decorations
+                        // (e.g. Firefox title bar) above CLIENT_Y_START are hidden.
                         let on_app_tab = ACTIVE_TAB.with(|v| v.get()) == 2;
                         if on_app_tab {
+                            let cy_start = CLIENT_Y_START as i32;
+                            let cy_end = CLIENT_Y_END as i32;
                             for (tex, tex_size, off_x, off_y) in &cached_client_textures {
-                                let src: Rectangle<f64, BufferCoord> =
-                                    Rectangle::from_size(
-                                        (tex_size.w as f64, tex_size.h as f64).into(),
-                                    );
                                 // Position within the client area: client_area_origin + surface offset
                                 let dst_x = *off_x;
-                                let dst_y = CLIENT_Y_START as i32 + *off_y;
+                                let dst_y = cy_start + *off_y;
+                                let dst_bottom = dst_y + tex_size.h;
+
+                                // Clip to client area vertically
+                                let clip_top = (cy_start - dst_y).max(0);
+                                let clip_bottom = (dst_bottom - cy_end).max(0);
+                                let vis_h = tex_size.h - clip_top - clip_bottom;
+                                if vis_h <= 0 { continue; }
+
+                                let src: Rectangle<f64, BufferCoord> =
+                                    Rectangle::new(
+                                        (0.0, clip_top as f64).into(),
+                                        (tex_size.w as f64, vis_h as f64).into(),
+                                    );
                                 let dst: Rectangle<i32, Physical> =
                                     Rectangle::new(
-                                        (dst_x, dst_y).into(),
-                                        (tex_size.w, tex_size.h).into(),
+                                        (dst_x, dst_y + clip_top).into(),
+                                        (tex_size.w, vis_h).into(),
                                     );
                                 if let Err(e) = frame.render_texture_from_to(
                                     tex,
