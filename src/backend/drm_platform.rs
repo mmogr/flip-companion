@@ -424,8 +424,29 @@ impl DrmPlatform {
             .map_err(|e| format!("dup lease fd: {e}"))?;
 
         // Initialize GPU renderer (probes DRM, creates GBM + EGL + GLES)
-        let mut gpu = super::gpu_renderer::GpuRenderer::new(lease_fd)
-            .map_err(|e| format!("GpuRenderer: {e}"))?;
+        // Retry a few times — after a GPU reset + execve, the hardware may
+        // need extra time to become available again.
+        let mut gpu = None;
+        for attempt in 1..=5 {
+            match super::gpu_renderer::GpuRenderer::new(
+                lease_fd.as_fd().try_clone_to_owned()
+                    .map_err(|e| format!("dup lease fd for gpu init: {e}"))?,
+            ) {
+                Ok(g) => {
+                    gpu = Some(g);
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("[drm-platform] GpuRenderer init attempt {attempt}/5 failed: {e}");
+                    if attempt < 5 {
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                }
+            }
+        }
+        let mut gpu = gpu.ok_or_else(|| "GpuRenderer: failed after 5 attempts".to_string())?;
+        // Consume the original lease_fd now that we've been duping it
+        drop(lease_fd);
 
         // Query supported DMA-BUF formats from EGL before moving gpu into RefCell.
         let dmabuf_formats = gpu.dmabuf_formats();
@@ -701,46 +722,13 @@ impl Platform for DrmPlatform {
             });
 
             // ── Check for GPU reset (mesa abort intercepted) ────────
-            if super::abort_guard::GPU_RESET_DETECTED.swap(false, Ordering::Acquire) {
-                eprintln!("[render] GPU reset detected via SIGABRT handler, recreating renderer...");
-                cached_client_textures.clear();
-                client_active = false;
-                touch_in_client = false;
-                // Drain pending layers
-                {
-                    let mut lock = self.pending_layers.lock().unwrap_or_else(|e| e.into_inner());
-                    lock.clear();
-                }
-                // Drop existing GPU state and recreate
-                {
-                    // Try to drop cleanly first — the old gpu may be in a bad state
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        drop(self.gpu.borrow_mut());
-                    }));
-                }
-                // Small delay to let the GPU settle after reset
-                std::thread::sleep(std::time::Duration::from_millis(100));
-
-                if let Some(spare_fd) = self.spare_lease_fd.borrow_mut().take() {
-                    use std::os::fd::AsFd;
-                    let next_spare = spare_fd.as_fd().try_clone_to_owned().ok();
-                    match super::gpu_renderer::GpuRenderer::new(spare_fd) {
-                        Ok(new_gpu) => {
-                            eprintln!("[render] GPU renderer recreated after reset");
-                            *self.gpu.borrow_mut() = new_gpu;
-                            if let Some(fd) = next_spare {
-                                *self.spare_lease_fd.borrow_mut() = Some(fd);
-                            }
-                            consecutive_render_errors = 0;
-                        }
-                        Err(e) => {
-                            eprintln!("[render] GPU recreation after reset FAILED: {e}");
-                        }
-                    }
-                }
-                self.render_waker
-                    .wait_timeout(std::time::Duration::from_millis(16));
-                continue;
+            if super::abort_guard::GPU_RESET_DETECTED.load(Ordering::Acquire) {
+                eprintln!("[render] GPU reset detected via abort() interposition");
+                // Mesa's amdgpu_winsys singleton is poisoned (parked worker
+                // thread holds internal mutexes). No new EGL context can be
+                // created on this GPU without deadlocking. Re-exec the
+                // process to get a completely fresh address space.
+                super::abort_guard::self_restart();
             }
 
             // ── Import Slint pixels as a GL texture ─────────────────
@@ -931,21 +919,30 @@ impl Platform for DrmPlatform {
                     consecutive_render_errors += 1;
                     eprintln!("[render] render_frame error ({consecutive_render_errors}): {e}");
 
-                    // GPU context may be lost after a device reset (e.g.
-                    // client killed mid-GPU-op). Recreate the renderer.
+                    // If the abort guard detected a GPU reset (SIGUSR1
+                    // interrupted us via siglongjmp), re-exec immediately.
+                    if super::abort_guard::GPU_RESET_DETECTED.load(Ordering::Acquire) {
+                        eprintln!("[render] GPU reset detected during render_frame, re-execing...");
+                        drop(gpu);
+                        super::abort_guard::self_restart();
+                    }
+
+                    // Non-reset render errors: recreate after 2 consecutive failures.
                     if consecutive_render_errors >= 2 {
                         eprintln!("[render] GPU context likely lost, attempting recreation...");
                         cached_client_textures.clear();
                         drop(gpu);
 
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+
                         if let Some(spare_fd) = self.spare_lease_fd.borrow_mut().take() {
                             use std::os::fd::AsFd;
-                            // Dup again so we keep a spare for the next reset.
                             let next_spare = spare_fd.as_fd().try_clone_to_owned().ok();
                             match super::gpu_renderer::GpuRenderer::new(spare_fd) {
                                 Ok(new_gpu) => {
-                                    eprintln!("[render] GPU renderer recreated successfully");
-                                    *self.gpu.borrow_mut() = new_gpu;
+                                    let old_gpu = self.gpu.replace(new_gpu);
+                                    std::mem::forget(old_gpu);
+                                    eprintln!("[render] GPU renderer recreated (old leaked)");
                                     if let Some(fd) = next_spare {
                                         *self.spare_lease_fd.borrow_mut() = Some(fd);
                                     }
@@ -959,13 +956,16 @@ impl Platform for DrmPlatform {
                             eprintln!("[render] no spare lease fd for GPU recreation");
                         }
 
-                        // Skip to next frame
                         self.render_waker
                             .wait_timeout(std::time::Duration::from_millis(16));
                         continue;
                     }
                 } else {
                     consecutive_render_errors = 0;
+
+                    // Even on Ok, check if abort fired during render_frame
+                    // (the SIGUSR1 may have arrived between GL calls without
+                    // causing an error). Handle it on the next iteration.
                 }
 
                 // Notify compositor that frame is done (sends frame callbacks)

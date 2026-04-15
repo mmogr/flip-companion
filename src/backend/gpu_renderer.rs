@@ -277,7 +277,39 @@ impl GpuRenderer {
     /// The callback draws into the `GlesFrame`. After it returns, the
     /// frame is finished, the GPU sync is waited on, and the buffer is
     /// page-flipped to the display via `set_crtc`.
+    ///
+    /// If a GPU context reset is detected (mesa worker calls abort()),
+    /// the SIGUSR1 handler longjmps out of the blocked GL call and this
+    /// function returns an error, allowing the caller to recreate the
+    /// renderer.
     pub fn render_frame(
+        &mut self,
+        transform: Transform,
+        render_fn: impl FnOnce(&mut GlesFrame<'_, '_>),
+    ) -> Result<(), GpuError> {
+        // Set up signal recovery point. If the mesa worker thread aborts
+        // during a GL call below, our SIGUSR1 handler will siglongjmp
+        // back here (returning non-zero) instead of leaving us stuck in
+        // a futex/ioctl that will never complete.
+        let jumped = unsafe { super::abort_guard::render_sigsetjmp() };
+        if jumped != 0 {
+            // Arrived via siglongjmp — GPU context is dead.
+            // Local variables (frame, target) are abandoned without Drop
+            // which is intentional: the caller will leak the entire renderer.
+            super::abort_guard::RENDER_JMP_ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+            return Err(GpuError::Gbm("GPU reset (signal recovery)".into()));
+        }
+        super::abort_guard::RENDER_JMP_ACTIVE.store(true, std::sync::atomic::Ordering::Release);
+
+        let result = self.render_frame_inner(transform, render_fn);
+
+        // Clear the recovery point before returning so the jmp_buf
+        // never points at a stale stack frame.
+        super::abort_guard::RENDER_JMP_ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+        result
+    }
+
+    fn render_frame_inner(
         &mut self,
         transform: Transform,
         render_fn: impl FnOnce(&mut GlesFrame<'_, '_>),
