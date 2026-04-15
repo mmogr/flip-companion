@@ -3,6 +3,8 @@ use std::time::Duration;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use tokio::sync::mpsc;
 
+use crate::backend::app_launcher::{AppExited, AppLauncher};
+use crate::config::AppEntry;
 use crate::platform::input::InputInjector;
 use crate::platform::stats::StatsProvider;
 use crate::platform::window::WindowManager;
@@ -17,6 +19,8 @@ pub enum UICommand {
     KeyPressed(String),
     ShuttleWindow { id: String, direction: String },
     RefreshWindows,
+    LaunchApp { index: i32 },
+    CloseApp,
 }
 
 /// Run the async backend loop.
@@ -29,14 +33,24 @@ pub async fn backend_loop(
     mut stats: Box<dyn StatsProvider>,
     input: Box<dyn InputInjector>,
     windows: Box<dyn WindowManager>,
+    apps: Vec<AppEntry>,
 ) {
     let mut stats_interval = tokio::time::interval(Duration::from_secs(1));
     let mut history = StatsHistory::new();
+
+    // App launcher + exit notification channel.
+    let (exit_tx, mut exit_rx) = mpsc::channel::<AppExited>(4);
+    let mut launcher = AppLauncher::new(exit_tx);
 
     loop {
         tokio::select! {
             _ = stats_interval.tick() => {
                 handle_stats_tick(&mut *stats, &app_weak, &mut history).await;
+            }
+            Some(exited) = exit_rx.recv() => {
+                eprintln!("[apps] app '{}' exited (code: {:?})", exited.name, exited.status);
+                launcher.on_exited();
+                set_app_running(&app_weak, false, "");
             }
             cmd = rx.recv() => {
                 match cmd {
@@ -49,11 +63,21 @@ pub async fn backend_loop(
                     Some(UICommand::RefreshWindows) => {
                         handle_refresh_windows(&*windows, &app_weak).await;
                     }
-                    None => break, // UI closed, channel dropped
+                    Some(UICommand::LaunchApp { index }) => {
+                        handle_launch_app(&mut launcher, &apps, index, &app_weak).await;
+                    }
+                    Some(UICommand::CloseApp) => {
+                        launcher.close().await;
+                        // The watcher task will send AppExited, which resets the UI.
+                    }
+                    None => break,
                 }
             }
         }
     }
+
+    // Cleanup: close any running app before exiting.
+    launcher.close().await;
 }
 
 async fn handle_stats_tick(
@@ -139,4 +163,33 @@ async fn handle_refresh_windows(windows: &dyn WindowManager, app_weak: &slint::W
         }
         Err(e) => eprintln!("[shuttle] refresh error: {e}"),
     }
+}
+
+async fn handle_launch_app(
+    launcher: &mut AppLauncher,
+    apps: &[AppEntry],
+    index: i32,
+    app_weak: &slint::Weak<App>,
+) {
+    let idx = index as usize;
+    let Some(entry) = apps.get(idx) else {
+        eprintln!("[apps] invalid app index: {index}");
+        return;
+    };
+
+    let url = entry.url.as_deref();
+    launcher.launch(&entry.name, &entry.exec, url).await;
+
+    if launcher.is_running() {
+        set_app_running(app_weak, true, &entry.name);
+    }
+}
+
+fn set_app_running(app_weak: &slint::Weak<App>, running: bool, name: &str) {
+    let name = SharedString::from(name);
+    let _ = app_weak.upgrade_in_event_loop(move |app| {
+        let store = app.global::<AppStore>();
+        store.set_is_running(running);
+        store.set_running_app_name(name);
+    });
 }

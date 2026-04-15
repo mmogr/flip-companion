@@ -1,0 +1,31 @@
+# Flip Companion — Apps Panel Configuration
+#
+# Each [[app]] entry defines a launchable application tile.
+#
+# Fields:
+#   name  = Display name shown on the tile
+#   icon  = Emoji or short label for the tile icon
+#   exec  = Command to execute (for Flatpak: "flatpak run <app-id>")
+#   url   = (Optional) URL to open — if set, launches the browser with this URL
+
+[[app]]
+name = "Firefox"
+icon = "🦊"
+exec = "flatpak run org.mozilla.firefox"
+
+[[app]]
+name = "Discord"
+icon = "💬"
+exec = "flatpak run com.discordapp.Discord"
+
+[[app]]
+name = "YouTube"
+icon = "▶️"
+exec = "flatpak run org.mozilla.firefox"
+url = "https://www.youtube.com"
+
+[[app]]
+name = "Steam Chat"
+icon = "💭"
+exec = "flatpak run com.valvesoftware.Steam"
+url = "steam://open/friends"

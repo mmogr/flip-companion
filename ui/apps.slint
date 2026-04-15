@@ -1,0 +1,106 @@
+// Apps panel — grid of launchable app tiles.
+// Tapping a tile sends launch-app(index). When an app is running,
+// shows a status banner with the running app name.
+
+import { AppStore } from "globals.slint";
+import { ListView } from "std-widgets.slint";
+
+component AppTile inherits Rectangle {
+    in property <string> name;
+    in property <string> icon;
+    in property <int> index;
+    callback tapped(int);
+
+    width: 100%;
+    height: 80px;
+    border-radius: 12px;
+    background: ta.pressed ? #1a5276 : #0f3460;
+
+    ta := TouchArea {
+        clicked => { root.tapped(root.index); }
+    }
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 12px;
+        alignment: start;
+
+        Text {
+            text: icon;
+            font-size: 28px;
+            vertical-alignment: center;
+        }
+
+        Text {
+            text: name;
+            font-size: 18px;
+            color: #e0e0f0;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+    }
+}
+
+export component Apps inherits Rectangle {
+    callback launch-app(int);
+    callback close-app();
+
+    background: #1a1a2e;
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 10px;
+
+        // Running app banner
+        if AppStore.is-running : Rectangle {
+            height: 56px;
+            border-radius: 8px;
+            background: #1a3a1a;
+
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 16px;
+                spacing: 8px;
+                alignment: space-between;
+
+                Text {
+                    text: "Running: " + AppStore.running-app-name;
+                    font-size: 16px;
+                    color: #90ee90;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+            }
+        }
+
+        // Header
+        if !AppStore.is-running : Text {
+            text: "Apps";
+            font-size: 22px;
+            color: #e0e0f0;
+        }
+
+        // Empty state
+        if AppStore.apps.length == 0 && !AppStore.is-running : Text {
+            text: "No apps configured.\nEdit apps.toml to add apps.";
+            font-size: 14px;
+            color: #808098;
+            horizontal-alignment: center;
+        }
+
+        // App list
+        if !AppStore.is-running : ListView {
+            vertical-stretch: 1;
+
+            for entry[idx] in AppStore.apps : AppTile {
+                name: entry.name;
+                icon: entry.icon;
+                index: idx;
+                tapped(i) => { root.launch-app(i); }
+            }
+        }
+    }
+}

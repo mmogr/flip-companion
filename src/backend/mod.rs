@@ -1,6 +1,9 @@
+pub mod abort_guard;
+pub mod app_launcher;
 pub mod drm_lease;
 pub mod drm_platform;
 pub mod evdev_input;
+pub mod gpu_renderer;
 pub mod kwin_window;
 pub mod mock;
 pub mod sysinfo_stats;

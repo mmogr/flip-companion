@@ -27,3 +27,17 @@ export struct WindowEntry {
 export global ShuttleStore {
     in-out property <[WindowEntry]> windows;
 }
+
+// A single launchable app entry for the Apps panel.
+export struct AppEntryData {
+    name: string,
+    icon: string,
+    exec: string,
+    url: string,
+}
+
+export global AppStore {
+    in-out property <[AppEntryData]> apps;
+    in-out property <bool> is-running: false;
+    in-out property <string> running-app-name: "";
+}

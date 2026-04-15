@@ -1,15 +1,18 @@
 // Flip Companion — root UI layout for the bottom screen.
-// Three tabs: Keyboard, Stats, Shuttle.
+// Three tabs: Keyboard, Stats, Apps.
 // All touch targets are ≥48px for finger-friendly operation.
 
 import { Keyboard } from "keyboard.slint";
 import { Stats } from "stats.slint";
 import { Shuttle } from "shuttle.slint";
+import { Apps } from "apps.slint";
 import { TopBar } from "top_bar.slint";
 import { StatsStore } from "globals.slint";
 import { ShuttleStore } from "globals.slint";
+import { AppStore } from "globals.slint";
 export { StatsStore }
 export { ShuttleStore }
+export { AppStore }
 
 component TabButton inherits Rectangle {
     in property <string> label;
@@ -39,13 +42,17 @@ export component App inherits Window {
     preferred-height: 800px;
     background: #1a1a2e;
 
-    // Track which tab is active: 0=Keyboard, 1=Stats, 2=Shuttle
+    // Track which tab is active: 0=Keyboard, 1=Stats, 2=Apps
     in-out property <int> active-tab: 0;
 
     // --- Callbacks for backend communication (wired in Rust via mpsc) ---
     callback key-pressed(string);
     callback shuttle-window(string, string); // window_id, direction ("up"/"down")
     callback request-refresh();
+    callback launch-app(int);  // app index from AppStore.apps
+    callback close-app();
+    callback ui-focus-changed(bool);  // true = Slint TextInput focused, false = unfocused
+    callback active-tab-changed(int); // notify Rust when the active tab changes
 
     VerticalLayout {
         // Top status bar — always visible
@@ -63,9 +70,14 @@ export component App inherits Window {
                 visible: active-tab == 1;
             }
             Shuttle {
-                visible: active-tab == 2;
+                visible: active-tab == 2 && !AppStore.is-running;
                 shuttle-window(id, dir) => { root.shuttle-window(id, dir); }
                 request-refresh() => { root.request-refresh(); }
+            }
+            Apps {
+                visible: active-tab == 2;
+                launch-app(idx) => { root.launch-app(idx); }
+                close-app() => { root.close-app(); }
             }
         }
 
@@ -81,19 +93,23 @@ export component App inherits Window {
                 TabButton {
                     label: "⌨️";
                     active: active-tab == 0;
-                    clicked => { active-tab = 0; }
+                    clicked => { active-tab = 0; root.active-tab-changed(0); }
                 }
                 TabButton {
                     label: "📊";
                     active: active-tab == 1;
-                    clicked => { active-tab = 1; }
+                    clicked => { active-tab = 1; root.active-tab-changed(1); }
                 }
                 TabButton {
-                    label: "🔀";
+                    label: AppStore.is-running && active-tab == 2 ? "✕" : "🚀";
                     active: active-tab == 2;
                     clicked => {
-                        active-tab = 2;
-                        root.request-refresh();
+                        if (AppStore.is-running && active-tab == 2) {
+                            root.close-app();
+                        } else {
+                            active-tab = 2;
+                            root.active-tab-changed(2);
+                        }
                     }
                 }
             }

@@ -1,21 +1,39 @@
-//! DRM KMS platform for Slint — renders the Slint UI into DRM dumb buffers
-//! on a leased CRTC. Uses Slint's software renderer (no GPU acceleration).
+//! DRM KMS platform for Slint — GPU-accelerated rendering with Wayland
+//! compositor integration for the AYANEO Flip DS bottom screen.
 //!
 //! The bottom panel (DP-1) is 1080×1620 portrait native. We tell Slint the
-//! window is 1620×1080 (landscape) and rotate 90° CW when writing to the
-//! DRM framebuffer.
+//! window is 1620×1080 (landscape) and use GPU rotation (Transform::_270)
+//! when rendering to the DRM framebuffer.
 //!
-//! Touch input is read from the Goodix evdev device and dispatched to Slint.
+//! Layout (landscape 1620×1080):
+//!   Top 40px    — Slint status bar
+//!   Middle 984px — Wayland client window area
+//!   Bottom 56px  — Slint navigation bar
+//!
+//! Touch input Y-split: touches in the status/nav regions go to Slint,
+//! touches in the middle go to the Wayland client via the compositor.
 
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::rc::Rc;
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use crate::compositor::{self, CompositorCommand, GrabCommand, SurfaceLayer, BufferData, RenderWaker};
 use crate::types::stats::SystemSnapshot;
+
+use smithay::backend::allocator::Fourcc;
+use smithay::backend::renderer::{Frame, ImportDma, ImportMem, Renderer, Texture};
+use smithay::utils::{Buffer as BufferCoord, Physical, Rectangle, Size, Transform};
 
 /// Shared stats snapshot: written by the stats thread, read by the render loop.
 static STATS_SNAPSHOT: OnceLock<Arc<Mutex<Option<SystemSnapshot>>>> = OnceLock::new();
+
+/// Flag set by kill_app() to force immediate clearing of cached GPU textures.
+/// The render loop checks this BEFORE any GPU rendering to prevent submitting
+/// draw calls with DMA-BUF textures from a dead client (which causes AMDGPU
+/// context reset → abort).
+static FORCE_CLEAR_TEXTURES: AtomicBool = AtomicBool::new(false);
 
 /// Called from main.rs after creating the App to register the shared snapshot.
 pub fn set_stats_snapshot(snap: Arc<Mutex<Option<SystemSnapshot>>>) {
@@ -49,8 +67,139 @@ pub fn create_key_channel() -> mpsc::Sender<String> {
     tx
 }
 
-use drm::buffer::Buffer;
-use drm::control::Device as ControlDevice;
+/// Keyboard grab channel: Slint focus callback sends GrabCommand,
+/// render loop receives and forwards to the keyboard thread.
+thread_local! {
+    static GRAB_RX: std::cell::RefCell<Option<mpsc::Receiver<GrabCommand>>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Register the grab receiver. Returns the sender for the Slint focus callback.
+/// Must be called from the thread that will run the event loop.
+pub fn create_grab_channel() -> mpsc::Sender<GrabCommand> {
+    let (tx, rx) = mpsc::channel();
+    GRAB_RX.with(|slot| *slot.borrow_mut() = Some(rx));
+    tx
+}
+
+// ── Active tab tracking ─────────────────────────────────────────────────
+
+thread_local! {
+    /// Current active tab index (0=Keyboard, 1=Stats, 2=Apps).
+    /// Updated from Slint UI callbacks, read by the render loop.
+    static ACTIVE_TAB: std::cell::Cell<i32> = std::cell::Cell::new(0);
+}
+
+/// Set the active tab index. Called from Slint tab-change callbacks.
+pub fn set_active_tab(tab: i32) {
+    ACTIVE_TAB.with(|v| v.set(tab));
+}
+
+// ── Compositor command sender ───────────────────────────────────────────
+
+thread_local! {
+    /// Clone of the calloop Sender for CompositorCommand.
+    /// Stored during DrmPlatform::new() so UI callbacks can send commands.
+    static COMPOSITOR_CMD_TX: std::cell::RefCell<Option<calloop::channel::Sender<CompositorCommand>>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Send a command to the compositor thread (e.g. CloseApp).
+pub fn send_compositor_command(cmd: CompositorCommand) {
+    COMPOSITOR_CMD_TX.with(|slot| {
+        if let Some(ref tx) = *slot.borrow() {
+            let _ = tx.send(cmd);
+        }
+    });
+}
+
+// ── App child PID tracking ──────────────────────────────────────────────
+
+thread_local! {
+    /// PID of the currently running app child process.
+    static APP_PID: std::cell::Cell<Option<u32>> = std::cell::Cell::new(None);
+    /// Flatpak application ID (e.g. "org.mozilla.firefox") if launched via flatpak.
+    static APP_FLATPAK_ID: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+}
+
+/// Store the PID of a launched app. Called from on_launch_app.
+pub fn set_app_pid(pid: u32) {
+    // Clear the force-clear flag — a new app is launching, so it's safe
+    // to resume importing client textures.
+    FORCE_CLEAR_TEXTURES.store(false, Ordering::Release);
+    APP_PID.with(|v| v.set(Some(pid)));
+}
+
+/// Store the Flatpak app ID so kill_app() can use `flatpak kill`.
+pub fn set_app_flatpak_id(id: String) {
+    APP_FLATPAK_ID.with(|v| *v.borrow_mut() = Some(id));
+}
+
+/// Kill the running app process and clear tracked state.
+///
+/// For Flatpak apps, uses `flatpak kill <app-id>` which reaches into the
+/// bwrap PID namespace and sends orderly shutdown. We do NOT also send
+/// SIGTERM/SIGKILL to the process group — that would kill Firefox
+/// abruptly mid-GPU-operation, causing an AMDGPU context reset that
+/// propagates to our GPU context and aborts the process.
+///
+/// For non-Flatpak apps, uses SIGTERM → SIGKILL escalation.
+pub fn kill_app() {
+    // Signal the render loop to drop all cached GPU textures immediately.
+    // This MUST happen before the kill, because once the client process dies
+    // its DMA-BUF GPU resources are freed. If we render a frame using those
+    // dead textures, the AMDGPU driver detects a GPU context reset and
+    // calls abort(), killing flip-companion.
+    FORCE_CLEAR_TEXTURES.store(true, Ordering::Release);
+
+    // For Flatpak: use `flatpak kill` exclusively — it sends orderly
+    // shutdown that lets Firefox clean up GPU resources gracefully.
+    let flatpak_id = APP_FLATPAK_ID.with(|v| v.borrow_mut().take());
+    let used_flatpak_kill = if let Some(ref app_id) = flatpak_id {
+        eprintln!("[game-mode] running: flatpak kill {app_id}");
+        match std::process::Command::new("flatpak")
+            .arg("kill")
+            .arg(app_id)
+            .spawn()
+        {
+            Ok(_) => {
+                eprintln!("[game-mode] flatpak kill sent for {app_id}");
+                true
+            }
+            Err(e) => {
+                eprintln!("[game-mode] flatpak kill failed: {e}, falling back to SIGTERM");
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    // Only send SIGTERM/SIGKILL if flatpak kill was not used.
+    // For flatpak apps, the host-side `flatpak run` process will exit
+    // on its own once the sandboxed app is killed.
+    if !used_flatpak_kill {
+        APP_PID.with(|v| {
+            if let Some(pid) = v.take() {
+                eprintln!("[game-mode] sending SIGTERM to process group {pid}");
+                unsafe { libc::kill(-(pid as i32), libc::SIGTERM); }
+                // Spawn a thread to escalate to SIGKILL after 2 seconds.
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    // Check if still alive, send SIGKILL.
+                    let ret = unsafe { libc::kill(-(pid as i32), 0) };
+                    if ret == 0 {
+                        eprintln!("[game-mode] SIGTERM timeout, sending SIGKILL to {pid}");
+                        unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
+                    }
+                });
+            }
+        });
+    } else {
+        // Still consume the PID so it doesn't linger.
+        APP_PID.with(|v| { v.take(); });
+    }
+}
 
 use slint::platform::software_renderer::{
     MinimalSoftwareWindow, PremultipliedRgbaColor, TargetPixel,
@@ -58,24 +207,18 @@ use slint::platform::software_renderer::{
 use slint::platform::{Platform, WindowAdapter};
 use slint::PhysicalSize;
 
-// ── DRM wrapper ─────────────────────────────────────────────────────────
+// ── Layout constants (landscape coordinates) ────────────────────────────
 
-struct LeaseCard(OwnedFd);
+/// Status bar height in logical landscape pixels.
+const STATUS_BAR_HEIGHT: f32 = 40.0;
+/// Client area Y start (inclusive) = top of the Wayland window region.
+const CLIENT_Y_START: f32 = STATUS_BAR_HEIGHT; // 40
+/// Client area height (1080 - 40 - 56 = 984).
+const CLIENT_HEIGHT: f32 = 984.0;
+/// Client area Y end (exclusive) = bottom of the Wayland window region.
+const CLIENT_Y_END: f32 = CLIENT_Y_START + CLIENT_HEIGHT; // 1024
 
-impl AsFd for LeaseCard {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.0.as_fd()
-    }
-}
-impl AsRawFd for LeaseCard {
-    fn as_raw_fd(&self) -> i32 {
-        self.0.as_raw_fd()
-    }
-}
-impl drm::Device for LeaseCard {}
-impl drm::control::Device for LeaseCard {}
-
-// ── Pixel type for Slint → DRM XRGB8888 ────────────────────────────────
+// ── Pixel type for Slint → XRGB8888 ────────────────────────────────────
 
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
@@ -99,13 +242,6 @@ impl TargetPixel for Xrgb8888Pixel {
     fn from_rgb(r: u8, g: u8, b: u8) -> Self {
         Self { b, g, r, x: 0xFF }
     }
-}
-
-// ── Framebuffer wrapper ─────────────────────────────────────────────────
-
-struct DrmFb {
-    db: drm::control::dumbbuffer::DumbBuffer,
-    fb: drm::control::framebuffer::Handle,
 }
 
 // ── Touch events from evdev thread ──────────────────────────────────────
@@ -256,68 +392,63 @@ fn spawn_touch_thread(
 
 // ── Platform impl ───────────────────────────────────────────────────────
 
+// ── Platform ────────────────────────────────────────────────────────────
+
 pub struct DrmPlatform {
     window: Rc<MinimalSoftwareWindow>,
-    card: LeaseCard,
-    connector: drm::control::connector::Handle,
-    crtc: drm::control::crtc::Handle,
-    mode: drm::control::Mode,
-    /// Physical DRM framebuffer dimensions (portrait: 1080×1620)
-    phys_width: u32,
-    phys_height: u32,
+    gpu: std::cell::RefCell<super::gpu_renderer::GpuRenderer>,
+    /// Spare lease fd for GPU renderer recreation after context reset.
+    spare_lease_fd: std::cell::RefCell<Option<OwnedFd>>,
     /// Logical landscape dimensions (1620×1080) — what Slint sees
     logical_width: u32,
     logical_height: u32,
     start: Instant,
     touch_rx: Option<mpsc::Receiver<TouchEvent>>,
+    // Compositor integration
+    render_waker: Arc<RenderWaker>,
+    pending_layers: Arc<Mutex<Vec<SurfaceLayer>>>,
+    has_toplevel: Arc<AtomicBool>,
+    client_touch_tx: calloop::channel::Sender<compositor::TouchEvent>,
+    client_key_tx: calloop::channel::Sender<compositor::KeyEvent>,
+    control_tx: calloop::channel::Sender<CompositorCommand>,
+    _compositor_handle: std::thread::JoinHandle<()>,
+    _keyboard_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl DrmPlatform {
     pub fn new(lease_fd: OwnedFd) -> Result<Self, String> {
-        let card = LeaseCard(lease_fd);
+        use std::os::fd::AsFd;
+        // Dup the lease fd before GpuRenderer consumes it — we keep a
+        // spare for GPU renderer recreation after context reset.
+        let spare_lease_fd = lease_fd.as_fd().try_clone_to_owned()
+            .map_err(|e| format!("dup lease fd: {e}"))?;
 
-        let res = card
-            .resource_handles()
-            .map_err(|e| format!("resource_handles: {e}"))?;
+        // Initialize GPU renderer (probes DRM, creates GBM + EGL + GLES)
+        let mut gpu = super::gpu_renderer::GpuRenderer::new(lease_fd)
+            .map_err(|e| format!("GpuRenderer: {e}"))?;
 
-        if res.connectors().is_empty() || res.crtcs().is_empty() {
-            return Err("lease has no connectors or CRTCs".into());
-        }
+        // Query supported DMA-BUF formats from EGL before moving gpu into RefCell.
+        let dmabuf_formats = gpu.dmabuf_formats();
+        eprintln!("[drm-platform] GPU advertises {} dmabuf format+modifier pairs", dmabuf_formats.iter().count());
 
-        let connector = res.connectors()[0];
-        let crtc = res.crtcs()[0];
-
-        let conn_info = card
-            .get_connector(connector, false)
-            .map_err(|e| format!("get_connector: {e}"))?;
-
-        if conn_info.modes().is_empty() {
-            return Err("connector has no modes".into());
-        }
-
-        let mode = conn_info.modes()[0];
-        let phys_width = mode.size().0 as u32; // 1080
-        let phys_height = mode.size().1 as u32; // 1620
-
-        // Landscape: swap dimensions for Slint
+        let output_size = gpu.output_size();
+        let phys_width = output_size.w as u32; // 1080
+        let phys_height = output_size.h as u32; // 1620
         let logical_width = phys_height; // 1620
         let logical_height = phys_width; // 1080
 
         eprintln!(
-            "[drm-platform] physical: {}x{}@{}Hz, logical (landscape): {}x{}",
-            phys_width,
-            phys_height,
-            mode.vrefresh(),
-            logical_width,
-            logical_height
+            "[drm-platform] physical: {}x{}, logical (landscape): {}x{}",
+            phys_width, phys_height, logical_width, logical_height
         );
 
+        // Slint window
         let window = MinimalSoftwareWindow::new(
             slint::platform::software_renderer::RepaintBufferType::ReusedBuffer,
         );
         window.set_size(PhysicalSize::new(logical_width, logical_height));
 
-        // Spawn touch input thread
+        // Touch input
         let touch_rx = spawn_touch_thread(logical_width, logical_height);
         if touch_rx.is_some() {
             eprintln!("[drm-platform] touch input enabled");
@@ -325,35 +456,61 @@ impl DrmPlatform {
             eprintln!("[drm-platform] warning: no touch input device found");
         }
 
+        // Shared compositor state
+        let render_waker = Arc::new(RenderWaker::new());
+        let pending_layers: Arc<Mutex<Vec<SurfaceLayer>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let has_toplevel = Arc::new(AtomicBool::new(false));
+
+        // Calloop channels for compositor communication
+        let (client_touch_tx, client_touch_rx) =
+            calloop::channel::channel::<compositor::TouchEvent>();
+        let (client_key_tx, client_key_rx) =
+            calloop::channel::channel::<compositor::KeyEvent>();
+        let (control_tx, control_rx) =
+            calloop::channel::channel::<CompositorCommand>();
+
+        // Store a clone of the compositor sender in a thread_local so
+        // Slint UI callbacks (close-app, etc.) can send commands.
+        COMPOSITOR_CMD_TX.with(|slot| {
+            *slot.borrow_mut() = Some(control_tx.clone());
+        });
+
+        // Spawn the Wayland compositor thread
+        let compositor_handle = compositor::wayland_thread::spawn(
+            compositor::wayland_thread::CompositorConfig {
+                pending_layers: pending_layers.clone(),
+                render_waker: render_waker.clone(),
+                has_toplevel: has_toplevel.clone(),
+                touch_rx: client_touch_rx,
+                key_rx: client_key_rx,
+                control_rx,
+                dmabuf_formats,
+            },
+        );
+
+        // Spawn the physical keyboard thread.
+        // The grab channel is created later (create_grab_channel),
+        // so we take GRAB_RX at the start of run_event_loop instead.
+        // Here we just hold key_tx for cloning later.
+
         Ok(Self {
             window,
-            card,
-            connector,
-            crtc,
-            mode,
-            phys_width,
-            phys_height,
+            gpu: std::cell::RefCell::new(gpu),
+            spare_lease_fd: std::cell::RefCell::new(Some(spare_lease_fd)),
             logical_width,
             logical_height,
             start: Instant::now(),
             touch_rx,
+            render_waker,
+            pending_layers,
+            has_toplevel,
+            client_touch_tx,
+            client_key_tx,
+            control_tx,
+            _compositor_handle: compositor_handle,
+            _keyboard_handle: None,
         })
-    }
-
-    fn create_fb(&self) -> Result<DrmFb, String> {
-        let db = self
-            .card
-            .create_dumb_buffer(
-                (self.phys_width, self.phys_height),
-                drm_fourcc::DrmFourcc::Xrgb8888,
-                32,
-            )
-            .map_err(|e| format!("create_dumb_buffer: {e}"))?;
-        let fb = self
-            .card
-            .add_framebuffer(&db, 24, 32)
-            .map_err(|e| format!("add_framebuffer: {e}"))?;
-        Ok(DrmFb { db, fb })
     }
 }
 
@@ -369,73 +526,114 @@ impl Platform for DrmPlatform {
     }
 
     fn run_event_loop(&self) -> Result<(), slint::PlatformError> {
-        let mut fb0 = self
-            .create_fb()
-            .map_err(|e| slint::PlatformError::Other(e.into()))?;
-        let mut fb1 = self
-            .create_fb()
-            .map_err(|e| slint::PlatformError::Other(e.into()))?;
-
-        // Landscape-sized buffer for Slint to render into.
-        let logical_pixels =
-            (self.logical_width * self.logical_height) as usize;
-        let mut render_buf = vec![Xrgb8888Pixel::default(); logical_pixels];
-
-        // Initial mode-set
-        self.card
-            .set_crtc(
-                self.crtc,
-                Some(fb0.fb),
-                (0, 0),
-                &[self.connector],
-                Some(self.mode),
-            )
-            .map_err(|e| {
-                slint::PlatformError::Other(format!("set_crtc: {e}").into())
-            })?;
-
-        let mut front = false;
-        let drm_stride = (fb0.db.pitch() / 4) as usize;
-        let lw = self.logical_width as usize;  // 1620
+        let lw = self.logical_width as usize; // 1620
         let lh = self.logical_height as usize; // 1080
+
+        // Landscape buffer for Slint software rendering
+        let mut render_buf =
+            vec![Xrgb8888Pixel::default(); lw * lh];
+
+        // Spawn the physical keyboard reader thread.
+        // GRAB_RX is set by create_grab_channel() called from main.rs before
+        // slint::run_event_loop(), so it is available here on the same thread.
+        let grab_rx = GRAB_RX.with(|slot| slot.borrow_mut().take());
+        if let Some(grab_rx) = grab_rx {
+            let handle = crate::input::keyboard_thread::spawn(
+                self.client_key_tx.clone(),
+                grab_rx,
+            );
+            if handle.is_some() {
+                eprintln!("[drm-platform] physical keyboard thread started");
+            } else {
+                eprintln!("[drm-platform] warning: no physical keyboard found");
+            }
+        }
 
         let mut is_pressed = false;
         let mut last_touch_pos = slint::LogicalPosition::new(0.0, 0.0);
+        let mut touch_in_client = false;
+        // Track whether we have an active Wayland client rendering.
+        // When false, all touches go to Slint (so app tiles, keyboard etc. work).
+        // Uses the shared AtomicBool set by the compositor when a toplevel exists.
+        let mut client_active = false;
 
-        // Create uinput virtual keyboard for key injection
-        let key_injector = match super::evdev_input::SyncEvdevInputInjector::try_new() {
-            Ok(inj) => Some(inj),
-            Err(e) => {
-                eprintln!("[drm-platform] warning: no uinput keyboard: {e}");
-                None
-            }
-        };
+        // Cached client textures — persist across frames so the last
+        // committed content stays on screen between Wayland commits.
+        let mut cached_client_textures: Vec<(smithay::backend::renderer::gles::GlesTexture, Size<i32, BufferCoord>, i32, i32)> = Vec::new();
+
+        // Create uinput virtual keyboard for system key injection
+        let key_injector =
+            match super::evdev_input::SyncEvdevInputInjector::try_new() {
+                Ok(inj) => Some(inj),
+                Err(e) => {
+                    eprintln!(
+                        "[drm-platform] warning: no uinput keyboard: {e}"
+                    );
+                    None
+                }
+            };
+
+        let mut consecutive_render_errors: u32 = 0;
 
         eprintln!(
             "[drm-platform] entering render loop \
-             (logical {}x{}, drm stride={})",
-            lw, lh, drm_stride
+             (logical {}x{}, GPU accelerated)",
+            lw, lh
         );
 
         loop {
-            // ── Process touch events ────────────────────────────────
+            // ── Process touch events with Y-split ───────────────────
             if let Some(ref rx) = self.touch_rx {
                 while let Ok(ev) = rx.try_recv() {
                     match ev {
                         TouchEvent::Down { x, y } => {
                             is_pressed = true;
-                            last_touch_pos = slint::LogicalPosition::new(x, y);
-                            self.window.dispatch_event(
-                                slint::platform::WindowEvent::PointerPressed {
-                                    position: last_touch_pos,
-                                    button:
-                                        slint::platform::PointerEventButton::Left,
-                                },
-                            );
+                            let on_app_tab = ACTIVE_TAB.with(|v| v.get()) == 2;
+                            eprintln!("[touch-dispatch] DOWN at ({x:.0},{y:.0}) client_active={client_active} on_app_tab={on_app_tab}");
+
+                            if client_active && on_app_tab && y >= CLIENT_Y_START && y < CLIENT_Y_END {
+                                // Client area — forward to Wayland compositor
+                                touch_in_client = true;
+                                let client_y = y - CLIENT_Y_START;
+                                let _ = self.client_touch_tx.send(
+                                    compositor::TouchEvent {
+                                        slot: 0,
+                                        x: x as f64,
+                                        y: client_y as f64,
+                                        kind: compositor::TouchEventKind::Down,
+                                    },
+                                );
+                            } else {
+                                // Slint bar area (status or nav)
+                                touch_in_client = false;
+                                last_touch_pos =
+                                    slint::LogicalPosition::new(x, y);
+                                eprintln!("[touch-dispatch] → Slint PointerPressed at ({x:.0},{y:.0})");
+                                self.window.dispatch_event(
+                                    slint::platform::WindowEvent::PointerPressed {
+                                        position: last_touch_pos,
+                                        button: slint::platform::PointerEventButton::Left,
+                                    },
+                                );
+                            }
                         }
                         TouchEvent::Move { x, y } => {
-                            if is_pressed {
-                                last_touch_pos = slint::LogicalPosition::new(x, y);
+                            if !is_pressed {
+                                continue;
+                            }
+                            if touch_in_client {
+                                let client_y = y - CLIENT_Y_START;
+                                let _ = self.client_touch_tx.send(
+                                    compositor::TouchEvent {
+                                        slot: 0,
+                                        x: x as f64,
+                                        y: client_y as f64,
+                                        kind: compositor::TouchEventKind::Motion,
+                                    },
+                                );
+                            } else {
+                                last_touch_pos =
+                                    slint::LogicalPosition::new(x, y);
                                 self.window.dispatch_event(
                                     slint::platform::WindowEvent::PointerMoved {
                                         position: last_touch_pos,
@@ -445,17 +643,29 @@ impl Platform for DrmPlatform {
                         }
                         TouchEvent::Up => {
                             is_pressed = false;
-                            self.window.dispatch_event(
-                                slint::platform::WindowEvent::PointerReleased {
-                                    position: last_touch_pos,
-                                    button:
-                                        slint::platform::PointerEventButton::Left,
-                                },
-                            );
+                            if touch_in_client {
+                                let _ = self.client_touch_tx.send(
+                                    compositor::TouchEvent {
+                                        slot: 0,
+                                        x: 0.0,
+                                        y: 0.0,
+                                        kind: compositor::TouchEventKind::Up,
+                                    },
+                                );
+                            } else {
+                                self.window.dispatch_event(
+                                    slint::platform::WindowEvent::PointerReleased {
+                                        position: last_touch_pos,
+                                        button: slint::platform::PointerEventButton::Left,
+                                    },
+                                );
+                            }
+                            touch_in_client = false;
                         }
                     }
                 }
             }
+
             // ── Process keyboard events ─────────────────────────────
             if let Some(ref injector) = key_injector {
                 KEY_RX.with(|slot| {
@@ -466,9 +676,10 @@ impl Platform for DrmPlatform {
                     }
                 });
             }
+
             // ── Poll shared stats and push to Slint via callback ────
             if let Some(shared) = STATS_SNAPSHOT.get() {
-                let snap = shared.lock().unwrap().take();
+                let snap = shared.lock().unwrap_or_else(|e| e.into_inner()).take();
                 if let Some(snap) = snap {
                     STATS_APPLY.with(|slot| {
                         if let Some(ref cb) = *slot.borrow() {
@@ -477,57 +688,308 @@ impl Platform for DrmPlatform {
                     });
                 }
             }
-            // ── Render ──────────────────────────────────────────────
-            slint::platform::update_timers_and_animations();
 
-            // Always request redraw — MinimalSoftwareWindow doesn't
-            // auto-invalidate when property bindings change.
+            // ── Render Slint to software buffer ─────────────────────
+            slint::platform::update_timers_and_animations();
             self.window.request_redraw();
 
-            if self.window.draw_if_needed(|renderer| {
-                // 1. Render into the landscape buffer
+            self.window.draw_if_needed(|renderer| {
                 renderer.render_by_line(LandscapeLineBuffer {
                     buf: &mut render_buf,
                     stride: lw,
                 });
+            });
 
-                // 2. Rotate 90° CW into the DRM framebuffer.
-                //    Landscape (lx, ly) → Portrait (px, py):
-                //      px = ly
-                //      py = (lw - 1) - lx
-                let target = if front { &mut fb0 } else { &mut fb1 };
-                let mut map =
-                    self.card.map_dumb_buffer(&mut target.db).unwrap();
-                let drm_buf: &mut [Xrgb8888Pixel] = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        map.as_mut().as_mut_ptr() as *mut Xrgb8888Pixel,
-                        map.as_mut().len() / 4,
-                    )
-                };
+            // ── Check for GPU reset (mesa abort intercepted) ────────
+            if super::abort_guard::GPU_RESET_DETECTED.swap(false, Ordering::Acquire) {
+                eprintln!("[render] GPU reset detected via SIGABRT handler, recreating renderer...");
+                cached_client_textures.clear();
+                client_active = false;
+                touch_in_client = false;
+                // Drain pending layers
+                {
+                    let mut lock = self.pending_layers.lock().unwrap_or_else(|e| e.into_inner());
+                    lock.clear();
+                }
+                // Drop existing GPU state and recreate
+                {
+                    // Try to drop cleanly first — the old gpu may be in a bad state
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        drop(self.gpu.borrow_mut());
+                    }));
+                }
+                // Small delay to let the GPU settle after reset
+                std::thread::sleep(std::time::Duration::from_millis(100));
 
-                for ly in 0..lh {
-                    for lx in 0..lw {
-                        let px = ly;
-                        let py = (lw - 1) - lx;
-                        let src_idx = ly * lw + lx;
-                        let dst_idx = py * drm_stride + px;
-                        drm_buf[dst_idx] = render_buf[src_idx];
+                if let Some(spare_fd) = self.spare_lease_fd.borrow_mut().take() {
+                    use std::os::fd::AsFd;
+                    let next_spare = spare_fd.as_fd().try_clone_to_owned().ok();
+                    match super::gpu_renderer::GpuRenderer::new(spare_fd) {
+                        Ok(new_gpu) => {
+                            eprintln!("[render] GPU renderer recreated after reset");
+                            *self.gpu.borrow_mut() = new_gpu;
+                            if let Some(fd) = next_spare {
+                                *self.spare_lease_fd.borrow_mut() = Some(fd);
+                            }
+                            consecutive_render_errors = 0;
+                        }
+                        Err(e) => {
+                            eprintln!("[render] GPU recreation after reset FAILED: {e}");
+                        }
                     }
                 }
-            }) {
-                let show = if front { &fb0 } else { &fb1 };
-                let _ = self.card.set_crtc(
-                    self.crtc,
-                    Some(show.fb),
-                    (0, 0),
-                    &[self.connector],
-                    Some(self.mode),
-                );
-                front = !front;
+                self.render_waker
+                    .wait_timeout(std::time::Duration::from_millis(16));
+                continue;
             }
 
-            // ~60 FPS — the bottom screen is 60 Hz
-            std::thread::sleep(std::time::Duration::from_millis(16));
+            // ── Import Slint pixels as a GL texture ─────────────────
+            let slint_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    render_buf.as_ptr() as *const u8,
+                    render_buf.len() * 4,
+                )
+            };
+
+            let mut gpu = self.gpu.borrow_mut();
+
+            let slint_size: Size<i32, BufferCoord> =
+                (lw as i32, lh as i32).into();
+            let slint_tex = match gpu
+                .renderer()
+                .import_memory(slint_bytes, Fourcc::Xrgb8888, slint_size, false)
+            {
+                Ok(tex) => Some(tex),
+                Err(e) => {
+                    eprintln!("[render] import slint texture: {e}");
+                    None
+                }
+            };
+
+            // ── Import Wayland client surface layers if available ────
+            // Only re-import when the compositor has new layers; otherwise
+            // reuse the cached textures so the last frame stays on screen.
+
+            // FIRST: check if the client has gone away. We must clear
+            // cached GPU textures (DMA-BUFs) BEFORE any GPU rendering.
+            // If we render with DMA-BUF textures from a dead client whose
+            // GPU resources have been freed, the AMDGPU driver detects a
+            // GPU context reset and aborts the process.
+            //
+            // Check FORCE_CLEAR_TEXTURES first — this is set synchronously
+            // by kill_app() (called from the close button callback) BEFORE
+            // the process is killed. This closes the race window between
+            // kill_app() and has_toplevel becoming false.
+            //
+            // The flag stays set until a new app is launched (cleared in
+            // set_app_pid), so we keep draining stale layers every frame
+            // even if the compositor hasn't processed CloseApp yet.
+            let force_cleared = FORCE_CLEAR_TEXTURES.load(Ordering::Acquire);
+            if force_cleared {
+                if !cached_client_textures.is_empty() {
+                    eprintln!("[drm-platform] force-clear: dropping cached client textures");
+                }
+                cached_client_textures.clear();
+                // Also drain any pending layers so we don't import dead DMA-BUFs.
+                let mut lock = self.pending_layers.lock().unwrap_or_else(|e| e.into_inner());
+                lock.clear();
+                drop(lock);
+                client_active = false;
+                touch_in_client = false;
+            }
+
+            let was_active = client_active;
+            // Don't re-read has_toplevel if force_cleared — it may still be
+            // true and would re-enable client_active, undoing the force-clear.
+            if !force_cleared {
+                client_active = self.has_toplevel.load(Ordering::Relaxed);
+            }
+
+            if was_active && !client_active {
+                eprintln!("[drm-platform] client deactivated, clearing cached textures");
+                cached_client_textures.clear();
+                touch_in_client = false;
+            }
+
+            // Only import new layers if the client is still alive.
+            if client_active {
+                let mut lock = self.pending_layers.lock().unwrap_or_else(|e| e.into_inner());
+                if !lock.is_empty() {
+                    let layers = std::mem::take(&mut *lock);
+                    drop(lock);
+
+                    let mut new_textures: Vec<(smithay::backend::renderer::gles::GlesTexture, Size<i32, BufferCoord>, i32, i32)> = Vec::new();
+                    for layer in &layers {
+                        match &layer.buffer {
+                            BufferData::Shm {
+                                data,
+                                width,
+                                height,
+                                stride: _,
+                                format,
+                            } => {
+                                let size: Size<i32, BufferCoord> =
+                                    (*width as i32, *height as i32).into();
+                                match gpu.renderer().import_memory(data, *format, size, false) {
+                                    Ok(tex) => new_textures.push((tex, size, layer.x, layer.y)),
+                                    Err(e) => eprintln!("[render] import shm layer at ({},{}): {e}", layer.x, layer.y),
+                                }
+                            }
+                            BufferData::Dma(ref dmabuf) => {
+                                match gpu.renderer().import_dmabuf(dmabuf, None) {
+                                    Ok(tex) => {
+                                        let size = tex.size();
+                                        new_textures.push((tex, size, layer.x, layer.y));
+                                    }
+                                    Err(e) => eprintln!("[render] import dma layer at ({},{}): {e}", layer.x, layer.y),
+                                }
+                            }
+                        }
+                    }
+                    if !new_textures.is_empty() {
+                        cached_client_textures = new_textures;
+                    }
+                }
+            }
+            let has_client = !cached_client_textures.is_empty();
+
+            // ── GPU composition + page flip ─────────────────────────
+            if slint_tex.is_some() || has_client {
+                if let Err(e) =
+                    gpu.render_frame(Transform::_270, |frame| {
+                        // Clear to black
+                        let full_screen: Rectangle<i32, Physical> =
+                            Rectangle::from_size(
+                                (lw as i32, lh as i32).into(),
+                            );
+                        let _ = frame.clear(
+                            smithay::backend::renderer::Color32F::BLACK,
+                            &[full_screen],
+                        );
+
+                        // Draw full-screen Slint layer (status bar + nav + background)
+                        if let Some(ref tex) = slint_tex {
+                            let tex_size = tex.size();
+                            let src: Rectangle<f64, BufferCoord> =
+                                Rectangle::from_size(
+                                    (tex_size.w as f64, tex_size.h as f64).into(),
+                                );
+                            let dst: Rectangle<i32, Physical> =
+                                Rectangle::new(
+                                    (0, 0).into(),
+                                    (lw as i32, lh as i32).into(),
+                                );
+                            if let Err(e) = frame.render_texture_from_to(
+                                tex,
+                                src,
+                                dst,
+                                &[dst],
+                                &[],
+                                Transform::Normal,
+                                1.0,
+                                None,
+                                &[],
+                            ) {
+                                eprintln!("[render] draw slint: {e}");
+                            }
+                        }
+
+                        // Overdraw client surface layers in the middle region,
+                        // but only when on the Apps tab (tab 2).
+                        let on_app_tab = ACTIVE_TAB.with(|v| v.get()) == 2;
+                        if on_app_tab {
+                            for (tex, tex_size, off_x, off_y) in &cached_client_textures {
+                                let src: Rectangle<f64, BufferCoord> =
+                                    Rectangle::from_size(
+                                        (tex_size.w as f64, tex_size.h as f64).into(),
+                                    );
+                                // Position within the client area: client_area_origin + surface offset
+                                let dst_x = *off_x;
+                                let dst_y = CLIENT_Y_START as i32 + *off_y;
+                                let dst: Rectangle<i32, Physical> =
+                                    Rectangle::new(
+                                        (dst_x, dst_y).into(),
+                                        (tex_size.w, tex_size.h).into(),
+                                    );
+                                if let Err(e) = frame.render_texture_from_to(
+                                    tex,
+                                    src,
+                                    dst,
+                                    &[dst],
+                                    &[],
+                                    Transform::Normal,
+                                    1.0,
+                                    None,
+                                    &[],
+                                ) {
+                                    eprintln!("[render] draw layer at ({},{}): {e}", off_x, off_y);
+                                }
+                            }
+                        }
+                    })
+                {
+                    consecutive_render_errors += 1;
+                    eprintln!("[render] render_frame error ({consecutive_render_errors}): {e}");
+
+                    // GPU context may be lost after a device reset (e.g.
+                    // client killed mid-GPU-op). Recreate the renderer.
+                    if consecutive_render_errors >= 2 {
+                        eprintln!("[render] GPU context likely lost, attempting recreation...");
+                        cached_client_textures.clear();
+                        drop(gpu);
+
+                        if let Some(spare_fd) = self.spare_lease_fd.borrow_mut().take() {
+                            use std::os::fd::AsFd;
+                            // Dup again so we keep a spare for the next reset.
+                            let next_spare = spare_fd.as_fd().try_clone_to_owned().ok();
+                            match super::gpu_renderer::GpuRenderer::new(spare_fd) {
+                                Ok(new_gpu) => {
+                                    eprintln!("[render] GPU renderer recreated successfully");
+                                    *self.gpu.borrow_mut() = new_gpu;
+                                    if let Some(fd) = next_spare {
+                                        *self.spare_lease_fd.borrow_mut() = Some(fd);
+                                    }
+                                    consecutive_render_errors = 0;
+                                }
+                                Err(e) => {
+                                    eprintln!("[render] GPU recreation FAILED: {e}");
+                                }
+                            }
+                        } else {
+                            eprintln!("[render] no spare lease fd for GPU recreation");
+                        }
+
+                        // Skip to next frame
+                        self.render_waker
+                            .wait_timeout(std::time::Duration::from_millis(16));
+                        continue;
+                    }
+                } else {
+                    consecutive_render_errors = 0;
+                }
+
+                // Notify compositor that frame is done (sends frame callbacks)
+                // Send whenever client is active, not just when new layers
+                // arrived — the client needs continuous frame callbacks to
+                // keep its rendering loop alive.
+                if client_active {
+                    let _ =
+                        self.control_tx.send(CompositorCommand::FrameDone);
+                }
+            }
+
+            // Clean up old textures to avoid GPU memory leaks
+            if let Err(e) = gpu.renderer().cleanup_texture_cache() {
+                eprintln!("[render] cleanup: {e}");
+            }
+
+            // Drop the borrow before sleeping
+            drop(gpu);
+
+            // Wait for next frame — Condvar wakes us early on new
+            // Wayland client commits, otherwise ~60 FPS timeout.
+            self.render_waker
+                .wait_timeout(std::time::Duration::from_millis(16));
         }
     }
 }
