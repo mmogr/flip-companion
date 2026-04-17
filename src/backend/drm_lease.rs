@@ -4,6 +4,12 @@
 //! via SCM_RIGHTS (sendmsg/recvmsg ancillary data). The lease fd is a DRM
 //! master for the leased connector/CRTC/plane — the companion app can
 //! perform mode-setting and page-flips on it directly.
+//!
+//! The Unix stream is kept open for the entire process lifetime and used
+//! by Gamescope as a liveness signal: while we're connected, Gamescope
+//! drops touch events for the bottom-screen touchscreen (we own them).
+//! When this process exits the socket closes, Gamescope sees POLLHUP, and
+//! touch events start flowing to wlserver again (needed for Desktop Mode).
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
@@ -14,16 +20,30 @@ use anyhow::{bail, Context, Result};
 /// `GAMESCOPE_LEASE_SOCK` environment variable.
 pub const DEFAULT_SOCKET_PATH: &str = "/tmp/gamescope-lease.sock";
 
+/// Result of receiving the lease: the DRM master fd plus the liveness
+/// socket that must be kept alive for the entire process lifetime.
+pub struct LeaseConnection {
+    pub lease_fd: OwnedFd,
+    /// Hold on to this for the whole process lifetime. Dropping it closes
+    /// the Unix socket connection, which signals Gamescope that the
+    /// companion has exited.
+    pub _liveness: UnixStream,
+}
+
 /// Connect to Gamescope's lease socket and receive the DRM lease fd.
 ///
 /// The protocol is trivial: connect, receive exactly one byte of data ('L')
-/// plus one SCM_RIGHTS fd, done.
-pub fn receive_lease_fd(socket_path: &str) -> Result<OwnedFd> {
+/// plus one SCM_RIGHTS fd. The returned `UnixStream` must be held open for
+/// the process lifetime so Gamescope can detect companion exit.
+pub fn receive_lease_fd(socket_path: &str) -> Result<LeaseConnection> {
     let stream = UnixStream::connect(socket_path)
         .with_context(|| format!("connect to '{socket_path}'"))?;
 
-    let fd = recv_fd(stream.as_raw_fd())?;
-    Ok(fd)
+    let lease_fd = recv_fd(stream.as_raw_fd())?;
+    Ok(LeaseConnection {
+        lease_fd,
+        _liveness: stream,
+    })
 }
 
 /// Low-level recvmsg with SCM_RIGHTS to extract a single file descriptor.

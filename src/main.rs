@@ -173,16 +173,25 @@ async fn create_backends(
 /// render the companion UI directly to the leased display.
 fn run_game_mode(socket_path: &str, config: &Config) {
     use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
 
     eprintln!("[game-mode] connecting to '{socket_path}'...");
 
-    let lease_fd = match backend::drm_lease::receive_lease_fd(socket_path) {
-        Ok(fd) => fd,
+    let lease = match backend::drm_lease::receive_lease_fd(socket_path) {
+        Ok(l) => l,
         Err(e) => {
             eprintln!("[game-mode] failed to receive lease fd: {e}");
             std::process::exit(1);
         }
     };
+
+    // Keep the liveness socket alive for the whole process. Gamescope uses
+    // its disconnect as the signal to resume forwarding bottom-screen touch
+    // events to wlserver (needed in Desktop Mode where we're not running).
+    // Leak it into 'static so nothing can drop it early.
+    let _liveness: &'static UnixStream = Box::leak(Box::new(lease._liveness));
+
+    let lease_fd = lease.lease_fd;
 
     eprintln!("[game-mode] received DRM lease fd {}", lease_fd.as_raw_fd());
 
