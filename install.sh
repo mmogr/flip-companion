@@ -429,6 +429,73 @@ SUDOERS
         info "Installed $sudoers_file (root:root 440)"
     fi
 
+    # ── 6b. Desktop Mode safety net ──────────────────────────────────────
+    #
+    # On Flip 1S DS the device always boots into Game Mode first. When the
+    # user switches to Desktop Mode, three things can leave the bottom
+    # touchscreen unresponsive under KWin:
+    #
+    #   (a) post_client_shutdown sometimes does not fire, so the Game-Mode
+    #       LIBINPUT_IGNORE udev rule in /run/udev/rules.d/ survives into
+    #       Desktop Mode and libinput keeps ignoring the device.
+    #   (b) Even after the rule is removed, KWin can retain a cached
+    #       "ignored" state for the device until the kernel re-announces it.
+    #   (c) Handheld Daemon (HHD) grabs /dev/input/event9 exclusively to
+    #       implement edge-swipe touchscreen shortcuts, which blocks all
+    #       touches from ever reaching KWin in Desktop Mode.
+    #
+    # We address all three:
+    #   - Install a root helper /etc/flip-companion/desktop-reset that
+    #     removes the stale rule AND rebinds the Goodix-TS driver
+    #     (forces KWin to re-enumerate) in a single atomic action.
+    #   - Install a KDE autostart entry that runs the helper (via the
+    #     existing NOPASSWD sudoers rule) at every Plasma login.
+    #   - Run the HHD touchscreen-shortcut disabler once, now, to edit
+    #     /etc/hhd/state.yml and restart HHD so its exclusive grab is
+    #     released.
+    step "6b/7  Configuring Desktop Mode safety net..."
+
+    if [[ -f "$deploy_dir/../desktop/flip-companion-desktop-reset" ]]; then
+        sudo install -m 755 -o root -g root \
+            "$deploy_dir/../desktop/flip-companion-desktop-reset" \
+            "$touch_dir/desktop-reset"
+        info "Installed $touch_dir/desktop-reset (root:root 755)"
+    else
+        warn "deploy/desktop/flip-companion-desktop-reset not found — skipping helper install"
+    fi
+
+    # KDE autostart entry — user-scoped, runs at every Plasma login.
+    local autostart_dir="$CONFIG_DIR/autostart"
+    mkdir -p "$autostart_dir"
+    if [[ -f "$deploy_dir/../desktop/flip-companion-desktop-reset.desktop" ]]; then
+        cp "$deploy_dir/../desktop/flip-companion-desktop-reset.desktop" \
+            "$autostart_dir/flip-companion-desktop-reset.desktop"
+        info "Installed $autostart_dir/flip-companion-desktop-reset.desktop"
+    fi
+
+    # Disable HHD touchscreen edge-swipe shortcuts. These steal all touches
+    # on /dev/input/event9, which is our bottom screen. Without this, Desktop
+    # Mode touch is completely unresponsive.
+    if [[ -f "$deploy_dir/../desktop/flip-companion-disable-hhd-touch" ]]; then
+        local hhd_helper="/usr/local/libexec/flip-companion/disable-hhd-touch"
+        sudo install -D -m 755 -o root -g root \
+            "$deploy_dir/../desktop/flip-companion-disable-hhd-touch" \
+            "$hhd_helper"
+        info "Installed $hhd_helper"
+
+        echo ""
+        echo "Disabling Handheld Daemon touchscreen edge-swipe shortcuts"
+        echo "(they exclusively grab the bottom screen and would prevent"
+        echo "KWin from seeing any touches in Desktop Mode)..."
+        if sudo "$hhd_helper"; then
+            info "HHD touchscreen shortcuts disabled"
+        else
+            warn "HHD fixup helper returned non-zero — may need re-run after first HHD boot"
+        fi
+    else
+        warn "deploy/desktop/flip-companion-disable-hhd-touch not found — skipping HHD fixup"
+    fi
+
     # Write version file for upgrade tracking
     cat > "$VERSION_FILE" << VEOF
 {"companion":"${comp_tag}","gamescope":"${game_tag}","connector":"${LEASE_CONNECTOR}","installed":"$(date -I)"}
@@ -450,6 +517,9 @@ VEOF
     echo -e "  ${GREEN}touch toggle${NC}       → /etc/flip-companion/touch-toggle"
     echo -e "  ${GREEN}touch udev rule${NC}    → /etc/flip-companion/99-flip-companion-touch.rules"
     echo -e "  ${GREEN}touch sudoers${NC}      → /etc/sudoers.d/flip-companion-touch"
+    echo -e "  ${GREEN}desktop reset${NC}      → /etc/flip-companion/desktop-reset"
+    echo -e "  ${GREEN}KDE autostart${NC}      → $CONFIG_DIR/autostart/flip-companion-desktop-reset.desktop"
+    echo -e "  ${GREEN}HHD fixup helper${NC}   → /usr/local/libexec/flip-companion/disable-hhd-touch"
     echo -e "  ${GREEN}version info${NC}       → $VERSION_FILE"
     echo ""
     info "Reboot into Game Mode to activate the bottom screen."
@@ -472,6 +542,7 @@ do_uninstall() {
         "$INSTALL_DIR/gamescope-lease-wrapper"
         "$ENV_DIR/10-gamescope-session.conf"
         "$ENV_DIR/20-gamescope-lease.conf"
+        "$CONFIG_DIR/autostart/flip-companion-desktop-reset.desktop"
     )
 
     for f in "${files[@]}"; do
@@ -516,6 +587,16 @@ do_uninstall() {
     if [[ -d "/etc/flip-companion" ]]; then
         sudo rm -rf "/etc/flip-companion"
         info "Removed /etc/flip-companion/"
+    fi
+    if [[ -d "/usr/local/libexec/flip-companion" ]]; then
+        sudo rm -rf "/usr/local/libexec/flip-companion"
+        info "Removed /usr/local/libexec/flip-companion/"
+    fi
+    # Restore the original /etc/hhd/state.yml if we backed it up.
+    if sudo test -f "/etc/hhd/state.yml.pre-flip-companion.bak"; then
+        sudo mv -f "/etc/hhd/state.yml.pre-flip-companion.bak" "/etc/hhd/state.yml"
+        info "Restored /etc/hhd/state.yml from backup"
+        sudo systemctl restart hhd.service 2>/dev/null || true
     fi
     # Reload udev so libinput picks up the touchscreen again
     sudo udevadm control --reload-rules 2>/dev/null || true

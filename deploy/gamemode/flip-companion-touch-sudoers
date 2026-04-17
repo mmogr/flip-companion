@@ -1,11 +1,12 @@
 # Allow members of the 'input' group to toggle the Goodix touchscreen
 # libinput isolation rule without a password prompt.
 #
-# This is narrowly scoped: ONLY the toggle helper is permitted, and ONLY
-# with the exact arguments 'enable' or 'disable'. No other commands.
+# This is narrowly scoped: ONLY our helpers are permitted, and ONLY with
+# exact, known-safe arguments. No other commands.
 #
-# Installed by: install.sh → /etc/sudoers.d/flip-companion-touch
+# Installed by: install.sh -> /etc/sudoers.d/flip-companion-touch
 # Validated at install time with: visudo -c -f
 
 %input ALL=(root) NOPASSWD: /etc/flip-companion/touch-toggle enable
 %input ALL=(root) NOPASSWD: /etc/flip-companion/touch-toggle disable
+%input ALL=(root) NOPASSWD: /etc/flip-companion/desktop-reset

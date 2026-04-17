@@ -1,0 +1,62 @@
+#!/bin/bash
+# flip-companion-desktop-reset — Restore bottom touchscreen for Desktop Mode
+#
+# Idempotent cleanup intended to run at every Plasma (Desktop Mode) login to
+# guarantee the Goodix bottom touchscreen is visible and responsive in KWin,
+# regardless of what prior state was left behind by Game Mode.
+#
+# Actions (all best-effort; exits 0 even if individual steps fail):
+#   1. Remove the dynamic LIBINPUT_IGNORE rule left by Game Mode (if any),
+#      reload udev rules, and re-trigger input devices.
+#   2. Unbind and rebind the Goodix-TS i2c driver. This forces the kernel
+#      to destroy and recreate the input node, which in turn forces KWin /
+#      libinput to re-enumerate the device with a clean state. Without
+#      this, KWin sometimes retains a cached "device ignored" state from
+#      the moment of the original LIBINPUT_IGNORE_DEVICE tag.
+#
+# This script must be owned by root:root and is invoked via a narrowly-scoped
+# sudoers rule (see flip-companion-touch-sudoers).
+#
+# Usage:
+#   sudo /etc/flip-companion/desktop-reset
+#
+# Installed by: install.sh → /etc/flip-companion/desktop-reset
+
+set -u
+
+readonly RULE_DST="/run/udev/rules.d/99-flip-companion-touch.rules"
+readonly GOODIX_DRIVER="/sys/bus/i2c/drivers/Goodix-TS"
+
+# Step 1: remove any stale libinput-ignore rule for the Goodix.
+if [[ -f "$RULE_DST" ]]; then
+    rm -f "$RULE_DST"
+    echo "flip-companion-desktop-reset: removed stale $RULE_DST"
+fi
+udevadm control --reload-rules 2>/dev/null || true
+udevadm trigger --subsystem-match=input 2>/dev/null || true
+
+# Step 2: find and rebind the Goodix i2c device, if the driver is present.
+if [[ -d "$GOODIX_DRIVER" ]]; then
+    # Find the bound device name (e.g. i2c-GDIX1003:00). There is usually
+    # exactly one on Flip DS hardware.
+    for dev_path in "$GOODIX_DRIVER"/*; do
+        dev="$(basename "$dev_path")"
+        # Skip the driver's own control files.
+        case "$dev" in
+            bind|unbind|module|uevent) continue ;;
+        esac
+        # Only rebind if it really is a bound device (symlink into /sys/devices).
+        [[ -L "$dev_path" ]] || continue
+
+        echo "flip-companion-desktop-reset: rebinding Goodix-TS ($dev)"
+        echo "$dev" > "$GOODIX_DRIVER/unbind" 2>/dev/null || true
+        # Brief pause so udev can process the remove event before the add.
+        sleep 0.3
+        echo "$dev" > "$GOODIX_DRIVER/bind"   2>/dev/null || true
+        break
+    done
+else
+    echo "flip-companion-desktop-reset: Goodix-TS driver not loaded — skipping rebind"
+fi
+
+exit 0

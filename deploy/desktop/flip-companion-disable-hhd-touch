@@ -1,0 +1,76 @@
+#!/bin/bash
+# flip-companion-disable-hhd-touch — Disable HHD touchscreen edge-swipe shortcuts
+#
+# Handheld Daemon (HHD) grabs /dev/input/event9 (the Goodix bottom touchscreen)
+# EXCLUSIVELY in order to implement edge-swipe shortcut gestures. While grabbed,
+# no other process — including KWin — receives any touch events, so the bottom
+# screen appears completely unresponsive in Desktop Mode.
+#
+# On AYANEO Flip 1S DS, those edge-swipes are redundant (the top screen has
+# physical buttons for QAM etc.), so we disable them. This releases the grab
+# and lets libinput/KWin see touches normally.
+#
+# This script is idempotent and safe to re-run. It edits /etc/hhd/state.yml
+# in-place, preserving a one-time backup (state.yml.pre-flip-companion.bak).
+#
+# Behaviour:
+#   * If /etc/hhd/state.yml does not exist yet → exits 0 quietly (HHD has not
+#     run yet; next boot will apply its defaults which we'll fix on a later
+#     invocation).
+#   * If all six shortcuts.touchscreen.{bottom,top,right_top,right_bottom,
+#     left_top,left_bottom} entries are already set to a non-"default" value
+#     → exits 0 without touching the file.
+#   * Otherwise → backs up, rewrites any "default" entries to "disabled",
+#     and restarts hhd.service so the daemon releases the grab.
+#
+# Usage (called by install.sh, does not need to be user-facing):
+#   sudo /usr/local/libexec/flip-companion/disable-hhd-touch
+#
+# Installed by: install.sh
+
+set -u
+
+readonly STATE="/etc/hhd/state.yml"
+readonly BACKUP="/etc/hhd/state.yml.pre-flip-companion.bak"
+
+if [[ ! -f "$STATE" ]]; then
+    echo "flip-companion-disable-hhd-touch: $STATE does not exist yet — skipping."
+    exit 0
+fi
+
+# Check if any of the six touchscreen shortcuts is still at "default".
+if ! awk '
+    /^  touchscreen:$/ { in_ts=1; next }
+    in_ts && /^  [a-z]/ { in_ts=0 }
+    in_ts && /^    (bottom|top|right_top|right_bottom|left_top|left_bottom): default$/ { found=1 }
+    END { exit !found }
+' "$STATE"; then
+    echo "flip-companion-disable-hhd-touch: HHD touchscreen shortcuts already disabled — nothing to do."
+    exit 0
+fi
+
+# One-time backup.
+if [[ ! -f "$BACKUP" ]]; then
+    cp "$STATE" "$BACKUP"
+    echo "flip-companion-disable-hhd-touch: backed up $STATE → $BACKUP"
+fi
+
+# Replace the six default entries. Anchored to shortcuts.touchscreen: block
+# via sed address range so we don't touch identically-named keys elsewhere.
+sed -i -E '/^  touchscreen:$/,/^  [a-z]/ {
+    s/^(    (bottom|top|right_top|right_bottom|left_top|left_bottom)): default$/\1: disabled/
+}' "$STATE"
+echo "flip-companion-disable-hhd-touch: disabled all shortcuts.touchscreen.* swipes in $STATE"
+
+# HHD must be restarted to drop its exclusive grab on the device (config
+# reload alone does not re-open event fds). Both the legacy non-templated
+# unit and the user-templated unit may be running; restart whichever
+# systemd knows about.
+for unit in hhd.service "hhd@1000.service"; do
+    if systemctl is-active --quiet "$unit"; then
+        systemctl restart "$unit" || true
+        echo "flip-companion-disable-hhd-touch: restarted $unit"
+    fi
+done
+
+exit 0

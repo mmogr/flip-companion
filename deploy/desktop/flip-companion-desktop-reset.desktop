@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Flip Companion Desktop Mode Reset
+Comment=Ensure the Goodix bottom touchscreen is usable in Plasma (removes any Game-Mode LIBINPUT_IGNORE rule and rebinds the Goodix-TS driver so KWin re-detects it).
+Exec=sudo -n /etc/flip-companion/desktop-reset
+X-KDE-autostart-phase=1
+OnlyShowIn=KDE;
+NoDisplay=true
