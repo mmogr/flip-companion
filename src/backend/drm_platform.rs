@@ -92,7 +92,10 @@ thread_local! {
 
 /// Set the active tab index. Called from Slint tab-change callbacks.
 pub fn set_active_tab(tab: i32) {
-    ACTIVE_TAB.with(|v| v.set(tab));
+    let prev = ACTIVE_TAB.with(|v| v.replace(tab));
+    if prev != tab {
+        eprintln!("[active-tab] {} -> {}", prev, tab);
+    }
 }
 
 // ── Compositor command sender ───────────────────────────────────────────

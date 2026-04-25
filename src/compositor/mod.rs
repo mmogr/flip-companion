@@ -154,8 +154,15 @@ pub enum GrabCommand {
 /// Stored in each Wayland client's data slot for automatic cleanup.
 pub struct ClientState {
     pub compositor_state: CompositorClientState,
-    /// Shared flag: cleared on disconnect so render thread knows client is gone.
+    /// Shared flag: cleared on disconnect of the toplevel-owning client so
+    /// the render thread knows the app is gone.
     pub has_toplevel: Arc<AtomicBool>,
+    /// True if THIS client created the active xdg_toplevel. Multi-process
+    /// apps (Firefox, Chromium) routinely open auxiliary wl_clients that
+    /// connect+disconnect mid-session; those disconnects must NOT tear
+    /// down the UI. Only a disconnect from the toplevel-owning client is
+    /// treated as the app exiting.
+    pub owns_toplevel: AtomicBool,
 }
 
 impl wayland_server::backend::ClientData for ClientState {
@@ -165,8 +172,13 @@ impl wayland_server::backend::ClientData for ClientState {
         _client_id: wayland_server::backend::ClientId,
         reason: wayland_server::backend::DisconnectReason,
     ) {
-        eprintln!("[compositor] client disconnected: {reason:?}");
-        self.has_toplevel.store(false, Ordering::Relaxed);
+        let owned = self.owns_toplevel.load(Ordering::Relaxed);
+        eprintln!(
+            "[compositor] client disconnected: {reason:?} (owns_toplevel={owned})"
+        );
+        if owned {
+            self.has_toplevel.store(false, Ordering::Relaxed);
+        }
     }
 }
 
@@ -379,6 +391,13 @@ impl XdgShellHandler for FlipCompositor {
         eprintln!("[compositor] wl_surface.enter sent for output");
 
         // Track as the single active toplevel.
+        // Mark THIS client as the toplevel owner so its disconnect (and
+        // not auxiliary-process disconnects) tears the app down.
+        if let Some(client) = wl_surface.client() {
+            if let Some(state) = client.get_data::<ClientState>() {
+                state.owns_toplevel.store(true, Ordering::Relaxed);
+            }
+        }
         self.has_toplevel.store(true, Ordering::Relaxed);
         self.toplevel = Some(surface);
     }

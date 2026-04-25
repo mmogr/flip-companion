@@ -207,6 +207,7 @@ fn run(config: CompositorConfig) {
                 let client_state = Arc::new(ClientState {
                     compositor_state: Default::default(),
                     has_toplevel: config.has_toplevel.clone(),
+                    owns_toplevel: AtomicBool::new(false),
                 });
                 match data.display.handle().insert_client(stream, client_state) {
                     Ok(_) => eprintln!("[compositor] new client connected"),
@@ -221,15 +222,29 @@ fn run(config: CompositorConfig) {
         }
 
         // After dispatch, check if the toplevel surface is still alive.
-        // Client disconnect (processed by dispatch_clients above) invalidates
-        // the surface. We MUST set toplevel = None BEFORE fire_frame_callbacks
-        // or any other code that walks the surface tree — otherwise smithay's
+        // The xdg_toplevel role can be destroyed independently of the client
+        // (e.g. GTK destroys+recreates the toplevel for fullscreen role
+        // transitions, or a page navigates and the window is rebuilt).
+        // We MUST set toplevel = None BEFORE fire_frame_callbacks or any
+        // other code that walks the surface tree — otherwise smithay's
         // internal surface data access panics on destroyed objects.
+        //
+        // We deliberately do NOT clear has_toplevel here. Doing so would
+        // make the render thread treat the app as gone and switch back to
+        // the launcher UI — which is incorrect when the client process is
+        // still alive and may map a fresh toplevel a moment later.
+        // has_toplevel is cleared only by:
+        //   • ClientData::disconnected (real client departure), or
+        //   • CompositorCommand::CloseApp (user-pressed close button).
+        // The render thread keeps showing the last cached frame until one
+        // of those happens or a new toplevel commits new layers.
         if let Some(ref tl) = data.state.toplevel {
             if !tl.alive() {
-                eprintln!("[compositor] toplevel surface died (client disconnect), cleaning up");
+                eprintln!(
+                    "[compositor] toplevel role destroyed (client still connected); \
+                     awaiting new toplevel or client disconnect"
+                );
                 data.state.toplevel = None;
-                data.state.has_toplevel.store(false, Ordering::Relaxed);
             }
         }
 
