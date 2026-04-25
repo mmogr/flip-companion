@@ -272,8 +272,8 @@ fn run(config: CompositorConfig) {
 // ── Input injection helpers ─────────────────────────────────────────────
 
 fn handle_touch(state: &mut FlipCompositor, touch: TouchEvent) {
-    use smithay::backend::input::ButtonState;
-    use smithay::input::pointer::{ButtonEvent, MotionEvent};
+    use smithay::backend::input::TouchSlot;
+    use smithay::input::touch::{DownEvent, MotionEvent, UpEvent};
     use smithay::utils::{Logical, Point};
 
     let Some(ref toplevel) = state.toplevel else {
@@ -284,13 +284,14 @@ fn handle_touch(state: &mut FlipCompositor, touch: TouchEvent) {
         return;
     }
     let wl_surface = toplevel.wl_surface().clone();
-    let Some(pointer) = state.seat.get_pointer() else {
+    let Some(touch_handle) = state.seat.get_touch() else {
         return;
     };
 
     let serial = smithay::utils::SERIAL_COUNTER.next_serial();
     let time = elapsed_ms();
     let location: Point<f64, Logical> = (touch.x, touch.y).into();
+    let slot: TouchSlot = Some(touch.slot as u32).into();
 
     // Surface origin in compositor space — smithay subtracts this from
     // event.location to get surface-local coordinates.
@@ -298,43 +299,24 @@ fn handle_touch(state: &mut FlipCompositor, touch: TouchEvent) {
 
     match touch.kind {
         super::TouchEventKind::Down => {
-            // Enter surface at touch coordinates + press button
-            pointer.motion(
+            touch_handle.down(
                 state,
                 Some((wl_surface, surface_origin)),
-                &MotionEvent { location, serial, time },
+                &DownEvent { slot, location, serial, time },
             );
-            pointer.button(
-                state,
-                &ButtonEvent {
-                    serial,
-                    time,
-                    button: 0x110, // BTN_LEFT
-                    state: ButtonState::Pressed,
-                },
-            );
-            pointer.frame(state);
+            touch_handle.frame(state);
         }
         super::TouchEventKind::Up => {
-            // Release button — keep focus on surface (no leave)
-            pointer.button(
-                state,
-                &ButtonEvent {
-                    serial,
-                    time,
-                    button: 0x110,
-                    state: ButtonState::Released,
-                },
-            );
-            pointer.frame(state);
+            touch_handle.up(state, &UpEvent { slot, serial, time });
+            touch_handle.frame(state);
         }
         super::TouchEventKind::Motion => {
-            pointer.motion(
+            touch_handle.motion(
                 state,
                 Some((wl_surface, surface_origin)),
-                &MotionEvent { location, serial, time },
+                &MotionEvent { slot, location, time },
             );
-            pointer.frame(state);
+            touch_handle.frame(state);
         }
     }
 }
